@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 )
 
 // ---- fixtures & helpers -------------------------------------------------
+
+const testDataKey = "key"
 
 // fakeInformer is a minimal cache.SharedIndexInformer stub that returns a
 // fixed HasSynced value, used to control the synced state reported by
@@ -50,6 +53,22 @@ func (c *countingStatusStore) UpdateReadDesireStatus(
 ) (desire.ReadDesire, error) {
 	c.updateCalls++
 	return c.statusStore.UpdateReadDesireStatus(ctx, id, status)
+}
+
+func assertStatusWriteCounts(
+	t *testing.T, store *countingStatusStore, controller *Controller,
+	wantUpdates int, wantPerformed, wantSkipped uint64,
+) {
+	t.Helper()
+	if store.updateCalls != wantUpdates {
+		t.Errorf("status update calls = %d, want %d", store.updateCalls, wantUpdates)
+	}
+	if got := controller.PerformedStatusWrites(); got != wantPerformed {
+		t.Errorf("performed status writes = %d, want %d", got, wantPerformed)
+	}
+	if got := controller.SkippedStatusWrites(); got != wantSkipped {
+		t.Errorf("skipped status writes = %d, want %d", got, wantSkipped)
+	}
 }
 
 // erroringStatusStore fails every UpdateReadDesireStatus call with err.
@@ -216,19 +235,82 @@ func TestSync_UnchangedObjectSuppressesStatusWrite(t *testing.T) {
 	if err := c.sync(ctx, id); err != nil {
 		t.Fatalf("sync() [1st] error = %v, want nil", err)
 	}
-	if counting.updateCalls != 1 {
-		t.Fatalf("updateCalls after 1st sync = %d, want 1", counting.updateCalls)
-	}
+	assertStatusWriteCounts(t, counting, c, 1, 1, 0)
 
 	if err := c.sync(ctx, id); err != nil {
 		t.Fatalf("sync() [2nd] error = %v, want nil", err)
 	}
-	if counting.updateCalls != 1 {
-		t.Errorf(
-			"updateCalls after 2nd sync (unchanged) = %d, want still 1: reconciling an unchanged object must suppress the write",
-			counting.updateCalls,
-		)
+	assertStatusWriteCounts(t, counting, c, 1, 1, 1)
+}
+
+func TestSync_ServerMetadataChangeSuppressesStatusWrite(t *testing.T) {
+	tests := []struct {
+		field string
+	}{
+		{field: testManagedFields},
+		{field: testResourceVersion},
+		{field: "generation"},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			ctx := context.Background()
+			base := memory.New()
+			id := readIdentity("default", "cm-server-metadata-"+strings.ToLower(tt.field))
+			seedReadDesire(t, base, id, "owner-1")
+
+			initial := newUnstructuredConfigMap(id.Name, id.Namespace, map[string]any{testDataKey: "value"})
+			first := New(base, base, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+			seedInformer(first, id, newLister(t, configMapGVR, initial), true)
+			if err := first.sync(ctx, id); err != nil {
+				t.Fatalf("sync() [initial] error = %v, want nil", err)
+			}
+
+			observed := newUnstructuredConfigMap(id.Name, id.Namespace, map[string]any{testDataKey: "value"})
+			metadata := observed.Object["metadata"].(map[string]any)
+			switch tt.field {
+			case testManagedFields:
+				metadata[tt.field] = []any{map[string]any{"manager": "different-manager"}}
+			case testResourceVersion:
+				metadata[tt.field] = "2"
+			case "generation":
+				metadata[tt.field] = int64(2)
+			}
+
+			counting := &countingStatusStore{statusStore: base}
+			second := New(base, counting, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+			seedInformer(second, id, newLister(t, configMapGVR, observed), true)
+			if err := second.sync(ctx, id); err != nil {
+				t.Fatalf("sync() [server metadata change] error = %v, want nil", err)
+			}
+
+			assertStatusWriteCounts(t, counting, second, 0, 0, 1)
+		})
+	}
+}
+
+func TestSync_MeaningfulObjectChangeWritesStatus(t *testing.T) {
+	ctx := context.Background()
+	base := memory.New()
+	id := readIdentity("default", "cm-changed")
+	seedReadDesire(t, base, id, "owner-1")
+
+	initial := newUnstructuredConfigMap(id.Name, id.Namespace, map[string]any{testDataKey: "one"})
+	first := New(base, base, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+	seedInformer(first, id, newLister(t, configMapGVR, initial), true)
+	if err := first.sync(ctx, id); err != nil {
+		t.Fatalf("sync() [initial] error = %v, want nil", err)
+	}
+
+	changed := newUnstructuredConfigMap(id.Name, id.Namespace, map[string]any{testDataKey: "two"})
+	counting := &countingStatusStore{statusStore: base}
+	second := New(base, counting, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+	seedInformer(second, id, newLister(t, configMapGVR, changed), true)
+	if err := second.sync(ctx, id); err != nil {
+		t.Fatalf("sync() [changed] error = %v, want nil", err)
+	}
+
+	assertStatusWriteCounts(t, counting, second, 1, 1, 0)
 }
 
 // TestSync_UpdateFailureIsPropagatedForRetry proves that any
@@ -252,6 +334,12 @@ func TestSync_UpdateFailureIsPropagatedForRetry(t *testing.T) {
 	err := c.sync(ctx, id)
 	if !errors.Is(err, updateErr) {
 		t.Fatalf("sync() error = %v, want it to wrap %v so the workqueue retries", err, updateErr)
+	}
+	if got := c.PerformedStatusWrites(); got != 0 {
+		t.Errorf("performed status writes after failed update = %d, want 0", got)
+	}
+	if got := c.SkippedStatusWrites(); got != 0 {
+		t.Errorf("skipped status writes after failed update = %d, want 0", got)
 	}
 }
 

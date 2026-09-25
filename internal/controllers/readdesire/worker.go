@@ -79,12 +79,14 @@ func (c *Controller) applyStatus(
 
 	newStatus := compute(d)
 	if readStatusEqual(newStatus, d.Status) {
+		c.skippedWrites.Add(1)
 		return nil
 	}
 
 	if _, err := c.status.UpdateReadDesireStatus(ctx, id, newStatus); err != nil {
 		return fmt.Errorf("readdesire: update read desire status %s/%s: %w", id.Namespace, id.Name, err)
 	}
+	c.performedWrites.Add(1)
 	return nil
 }
 

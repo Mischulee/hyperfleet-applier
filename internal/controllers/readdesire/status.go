@@ -2,6 +2,9 @@ package readdesire
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"io"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -71,7 +74,46 @@ func withReadCondition(status desire.ReadStatus, cond metav1.Condition, kubeCont
 
 // readStatusEqual reports whether a and b are equal for the purpose of
 // suppressing a redundant status write: same conditions (via util.Equal)
-// and byte-identical KubeContent.
+// and semantically identical KubeContent. Kubernetes-managed metadata is
+// ignored when comparing content, but the raw observed content remains in
+// the status that is written.
 func readStatusEqual(a, b desire.ReadStatus) bool {
-	return util.Equal(a.Status, b.Status) && bytes.Equal(a.KubeContent, b.KubeContent)
+	return util.Equal(a.Status, b.Status) && semanticContentEqual(a.KubeContent, b.KubeContent)
+}
+
+func semanticContentEqual(a, b []byte) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+
+	hashA, okA := semanticContentHash(a)
+	hashB, okB := semanticContentHash(b)
+	return okA && okB && hashA == hashB
+}
+
+// semanticContentHash returns a hash of canonical JSON with Kubernetes-managed
+// metadata removed. An invalid persisted value is deliberately treated as
+// different by the caller, allowing the next valid observation to replace it.
+func semanticContentHash(content []byte) ([32]byte, bool) {
+	var zero [32]byte
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return zero, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return zero, false
+	}
+	if metadata, ok := object["metadata"].(map[string]any); ok {
+		delete(metadata, "managedFields")
+		delete(metadata, "resourceVersion")
+		delete(metadata, "generation")
+	}
+	normalized, err := json.Marshal(object)
+	if err != nil {
+		return zero, false
+	}
+	return sha256.Sum256(normalized), true
 }

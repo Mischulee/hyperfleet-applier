@@ -9,6 +9,11 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 )
 
+const (
+	testManagedFields   = "managedFields"
+	testResourceVersion = "resourceVersion"
+)
+
 func TestSynced_SetsSyncedReasonAndKubeContent(t *testing.T) {
 	content := []byte(`{"kind":"ConfigMap"}`)
 	got := synced(desire.ReadStatus{}, content)
@@ -68,5 +73,63 @@ func TestReadStatusEqual_DetectsKubeContentOnlyDifference(t *testing.T) {
 	}
 	if !readStatusEqual(a, a) {
 		t.Error("readStatusEqual(a, a) = false, want true: identical values must compare equal")
+	}
+}
+
+func TestReadStatusEqual_ContentComparison(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		stored    string
+		wantEqual bool
+	}{
+		{
+			name:      testManagedFields,
+			current:   `{"metadata":{"name":"cm","managedFields":[{"manager":"a"}]},"data":{"key":"value"}}`,
+			stored:    `{"metadata":{"name":"cm","managedFields":[{"manager":"b"}]},"data":{"key":"value"}}`,
+			wantEqual: true,
+		},
+		{
+			name:      testResourceVersion,
+			current:   `{"metadata":{"name":"cm","resourceVersion":"1"},"data":{"key":"value"}}`,
+			stored:    `{"metadata":{"name":"cm","resourceVersion":"2"},"data":{"key":"value"}}`,
+			wantEqual: true,
+		},
+		{
+			name:      "generation metadata",
+			current:   `{"metadata":{"name":"cm","generation":1},"data":{"key":"value"}}`,
+			stored:    `{"metadata":{"name":"cm","generation":2},"data":{"key":"value"}}`,
+			wantEqual: true,
+		},
+		{
+			name:      "meaningful content",
+			current:   `{"metadata":{"name":"cm"},"data":{"key":"one"}}`,
+			stored:    `{"metadata":{"name":"cm"},"data":{"key":"two"}}`,
+			wantEqual: false,
+		},
+		{
+			name:      "distinct large numbers",
+			current:   `{"metadata":{"name":"cm"},"data":{"value":9007199254740992}}`,
+			stored:    `{"metadata":{"name":"cm"},"data":{"value":9007199254740993}}`,
+			wantEqual: false,
+		},
+		{
+			name:      "malformed persisted content",
+			current:   `{"metadata":{"name":"cm"}}`,
+			stored:    `{"metadata":`,
+			wantEqual: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := readStatusEqual(
+				desire.ReadStatus{KubeContent: []byte(tt.current)},
+				desire.ReadStatus{KubeContent: []byte(tt.stored)},
+			)
+			if got != tt.wantEqual {
+				t.Errorf("readStatusEqual() = %t, want %t", got, tt.wantEqual)
+			}
+		})
 	}
 }

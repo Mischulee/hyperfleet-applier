@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -72,6 +73,8 @@ type Controller struct {
 	informers         *InformerManager
 	managementCluster string
 	pollInterval      time.Duration
+	skippedWrites     atomic.Uint64
+	performedWrites   atomic.Uint64
 }
 
 // Option configures optional Controller behavior.
@@ -79,6 +82,18 @@ type Option func(*options)
 
 type options struct {
 	informerSyncTimeout time.Duration
+}
+
+// SkippedStatusWrites returns the number of ReadDesire status updates skipped
+// because the computed status was semantically unchanged.
+func (c *Controller) SkippedStatusWrites() uint64 {
+	return c.skippedWrites.Load()
+}
+
+// PerformedStatusWrites returns the number of successfully completed
+// ReadDesire status updates.
+func (c *Controller) PerformedStatusWrites() uint64 {
+	return c.performedWrites.Load()
 }
 
 // WithInformerSyncTimeout overrides the default timeout for waiting on a
