@@ -9,11 +9,6 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 )
 
-const (
-	testManagedFields   = "managedFields"
-	testResourceVersion = "resourceVersion"
-)
-
 func TestSynced_SetsSyncedReasonAndKubeContent(t *testing.T) {
 	content := []byte(`{"kind":"ConfigMap"}`)
 	got := synced(desire.ReadStatus{}, content)
@@ -84,13 +79,13 @@ func TestReadStatusEqual_ContentComparison(t *testing.T) {
 		wantEqual bool
 	}{
 		{
-			name:      testManagedFields,
+			name:      managedFieldsField,
 			current:   `{"metadata":{"name":"cm","managedFields":[{"manager":"a"}]},"data":{"key":"value"}}`,
 			stored:    `{"metadata":{"name":"cm","managedFields":[{"manager":"b"}]},"data":{"key":"value"}}`,
 			wantEqual: true,
 		},
 		{
-			name:      testResourceVersion,
+			name:      resourceVersionField,
 			current:   `{"metadata":{"name":"cm","resourceVersion":"1"},"data":{"key":"value"}}`,
 			stored:    `{"metadata":{"name":"cm","resourceVersion":"2"},"data":{"key":"value"}}`,
 			wantEqual: true,
@@ -117,6 +112,12 @@ func TestReadStatusEqual_ContentComparison(t *testing.T) {
 			name:      "malformed persisted content",
 			current:   `{"metadata":{"name":"cm"}}`,
 			stored:    `{"metadata":`,
+			wantEqual: false,
+		},
+		{
+			name:      "trailing JSON content",
+			current:   `{"metadata":{"name":"cm"}}{"x":1}`,
+			stored:    `{"metadata":{"name":"cm"}}`,
 			wantEqual: false,
 		},
 	}

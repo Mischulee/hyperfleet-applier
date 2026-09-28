@@ -2,14 +2,21 @@ package readdesire
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/util"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
+)
+
+const (
+	metadataField        = "metadata"
+	managedFieldsField   = "managedFields"
+	resourceVersionField = "resourceVersion"
+	generationField      = "generation"
 )
 
 // synced returns a copy of status with the Successful condition set to True,
@@ -86,34 +93,33 @@ func semanticContentEqual(a, b []byte) bool {
 		return true
 	}
 
-	hashA, okA := semanticContentHash(a)
-	hashB, okB := semanticContentHash(b)
-	return okA && okB && hashA == hashB
+	canonicalA, okA := canonicalContent(a)
+	canonicalB, okB := canonicalContent(b)
+	return okA && okB && bytes.Equal(canonicalA, canonicalB)
 }
 
-// semanticContentHash returns a hash of canonical JSON with Kubernetes-managed
-// metadata removed. An invalid persisted value is deliberately treated as
-// different by the caller, allowing the next valid observation to replace it.
-func semanticContentHash(content []byte) ([32]byte, bool) {
-	var zero [32]byte
+// canonicalContent returns canonical JSON with Kubernetes-managed metadata
+// removed. An invalid persisted value is deliberately treated as different by
+// the caller, allowing the next valid observation to replace it.
+func canonicalContent(content []byte) ([]byte, bool) {
 	var object map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
 	if err := decoder.Decode(&object); err != nil {
-		return zero, false
+		return nil, false
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return zero, false
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, false
 	}
-	if metadata, ok := object["metadata"].(map[string]any); ok {
-		delete(metadata, "managedFields")
-		delete(metadata, "resourceVersion")
-		delete(metadata, "generation")
+	if metadata, ok := object[metadataField].(map[string]any); ok {
+		delete(metadata, managedFieldsField)
+		delete(metadata, resourceVersionField)
+		delete(metadata, generationField)
 	}
 	normalized, err := json.Marshal(object)
 	if err != nil {
-		return zero, false
+		return nil, false
 	}
-	return sha256.Sum256(normalized), true
+	return normalized, true
 }

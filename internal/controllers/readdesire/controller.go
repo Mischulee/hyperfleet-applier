@@ -85,6 +85,9 @@ type options struct {
 	informerSyncTimeout time.Duration
 }
 
+// The status-write counters below are process-local and are not currently
+// exposed as Prometheus metrics; HYPERFLEET-1722 tracks their exposure.
+//
 // SkippedStatusWrites returns the number of ReadDesire status updates skipped
 // because the computed status was semantically unchanged.
 func (c *Controller) SkippedStatusWrites() uint64 {

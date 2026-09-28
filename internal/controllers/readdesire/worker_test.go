@@ -129,7 +129,7 @@ func TestSync_FoundObjectRecordsSynced(t *testing.T) {
 	id := readIdentity("default", "cm-found")
 	seedReadDesire(t, store, id, "owner-1")
 
-	obj := newUnstructuredConfigMap("cm-found", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-found", "default", map[string]any{testDataKey: "v"})
 	c := New(store, store, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
 
@@ -250,7 +250,7 @@ func TestSync_UnchangedObjectSuppressesStatusWrite(t *testing.T) {
 	id := readIdentity("default", "cm-noop")
 	seedReadDesire(t, base, id, "owner-1")
 
-	obj := newUnstructuredConfigMap("cm-noop", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-noop", "default", map[string]any{testDataKey: "v"})
 	c := New(base, counting, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
 
@@ -269,9 +269,9 @@ func TestSync_ServerMetadataChangeSuppressesStatusWrite(t *testing.T) {
 	tests := []struct {
 		field string
 	}{
-		{field: testManagedFields},
-		{field: testResourceVersion},
-		{field: "generation"},
+		{field: managedFieldsField},
+		{field: resourceVersionField},
+		{field: generationField},
 	}
 
 	for _, tt := range tests {
@@ -289,14 +289,19 @@ func TestSync_ServerMetadataChangeSuppressesStatusWrite(t *testing.T) {
 			}
 
 			observed := newUnstructuredConfigMap(id.Name, id.Namespace, map[string]any{testDataKey: "value"})
-			metadata := observed.Object["metadata"].(map[string]any)
+			metadata, ok := observed.Object[metadataField].(map[string]any)
+			if !ok {
+				t.Fatalf("fixture metadata is not a map: %T", observed.Object[metadataField])
+			}
 			switch tt.field {
-			case testManagedFields:
+			case managedFieldsField:
 				metadata[tt.field] = []any{map[string]any{"manager": "different-manager"}}
-			case testResourceVersion:
+			case resourceVersionField:
 				metadata[tt.field] = "2"
-			case "generation":
+			case generationField:
 				metadata[tt.field] = int64(2)
+			default:
+				t.Fatalf("unhandled test field %q", tt.field)
 			}
 
 			counting := &countingStatusStore{statusStore: base}
@@ -349,7 +354,7 @@ func TestSync_UpdateFailureIsPropagatedForRetry(t *testing.T) {
 
 	updateErr := errors.New("status store unavailable")
 	failing := &erroringStatusStore{statusStore: base, err: updateErr}
-	obj := newUnstructuredConfigMap("cm-update-fails", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-update-fails", "default", map[string]any{testDataKey: "v"})
 	c := New(base, failing, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
 
@@ -375,7 +380,7 @@ func TestSync_TransientUpdateFailureThenSuccessCountsBothOutcomes(t *testing.T) 
 	seedReadDesire(t, base, id, "owner-1")
 
 	flaky := &flakyStatusStore{statusStore: base, remainingFailures: 2}
-	obj := newUnstructuredConfigMap("cm-transient-update", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-transient-update", "default", map[string]any{testDataKey: "v"})
 	c := New(base, flaky, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
 
@@ -523,7 +528,7 @@ func TestProcessNextWorkItem_SuccessForgetsKey(t *testing.T) {
 	store := memory.New()
 	id := readIdentity("default", "cm-success")
 	seedReadDesire(t, store, id, "owner-1")
-	obj := newUnstructuredConfigMap("cm-success", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-success", "default", map[string]any{testDataKey: "v"})
 
 	c := New(store, store, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
@@ -598,7 +603,7 @@ func TestProcessNextWorkItem_UpdateFailureRetries(t *testing.T) {
 	seedReadDesire(t, base, id, "owner-1")
 	updateErr := errors.New("status store unavailable")
 	failing := &erroringStatusStore{statusStore: base, err: updateErr}
-	obj := newUnstructuredConfigMap("cm-update-retry", "default", map[string]any{"k": "v"})
+	obj := newUnstructuredConfigMap("cm-update-retry", "default", map[string]any{testDataKey: "v"})
 
 	c := New(base, failing, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
 	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
