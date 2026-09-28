@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +218,18 @@ func seedApplyDesire(
 		t.Fatalf("CreateApplyDesire(%+v): %v", id, err)
 	}
 	return d
+}
+
+func requireApplyCondition(
+	t *testing.T, d desire.ApplyDesire, wantStatus metav1.ConditionStatus, wantReason string, wantObservedGeneration int64,
+) {
+	t.Helper()
+	c := findCondition(d.Status, desire.TypeSuccessful)
+	if c == nil || c.Status != wantStatus || c.Reason != wantReason ||
+		c.ObservedGeneration != wantObservedGeneration {
+		t.Fatalf("Successful condition = %+v, want Status=%s Reason=%q ObservedGeneration=%d",
+			c, wantStatus, wantReason, wantObservedGeneration)
+	}
 }
 
 func findPatchAction(actions []k8stesting.Action, gvr schema.GroupVersionResource) *k8stesting.PatchActionImpl {
@@ -1210,108 +1223,100 @@ func TestReconcileAll_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_SameOutcomeAtNewGenerationWritesStatus(t *testing.T) {
-	ctx := context.Background()
-	const name = "cm-new-generation"
-	dyn := newFakeDynamicClient(t, newConfigMapObject(name, defaultNamespace))
-	base := memory.New()
-	counting := &countingStatusStore{StatusStore: base}
-	r := New(base, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
-	id := applyIdentity("", "configmaps", defaultNamespace, name)
-	content := newConfigMapContent(t, name, defaultNamespace, map[string]string{"k": "v"})
-	seedApplyDesire(t, base, id, "owner-1", content)
+func TestReconcileAll_GenerationTransitions(t *testing.T) {
+	const targetName = "cm-generation-transition"
+	for _, tc := range []struct {
+		name        string
+		firstValid  bool
+		nextValid   bool
+		nextValue   string
+		firstStatus metav1.ConditionStatus
+		firstReason string
+		nextStatus  metav1.ConditionStatus
+		nextReason  string
+	}{
+		{
+			name: "SameSuccessAtNewGeneration", firstValid: true, nextValid: true, nextValue: "v1",
+			firstStatus: metav1.ConditionTrue, firstReason: desire.ReasonApplied,
+			nextStatus: metav1.ConditionTrue, nextReason: desire.ReasonApplied,
+		},
+		{
+			name: "SuccessToPreCheckFailure", firstValid: true, nextValid: false, nextValue: "v2",
+			firstStatus: metav1.ConditionTrue, firstReason: desire.ReasonApplied,
+			nextStatus: metav1.ConditionFalse, nextReason: desire.ReasonPreCheckFailed,
+		},
+		{
+			name: "PreCheckFailureToSuccess", firstValid: false, nextValid: true, nextValue: "v2",
+			firstStatus: metav1.ConditionFalse, firstReason: desire.ReasonPreCheckFailed,
+			nextStatus: metav1.ConditionTrue, nextReason: desire.ReasonApplied,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dyn := newFakeDynamicClient(t, newConfigMapObject(targetName, defaultNamespace))
+			store := memory.New()
+			counting := &countingStatusStore{StatusStore: store}
+			r := New(store, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
+			id := applyIdentity("", "configmaps", defaultNamespace, targetName)
+			manifestName := func(valid bool) string {
+				if valid {
+					return targetName
+				}
+				return "wrong-name"
+			}
+			firstContent := newConfigMapContent(t, manifestName(tc.firstValid), defaultNamespace,
+				map[string]string{"k": "v1"})
+			seedApplyDesire(t, store, id, "owner-1", firstContent)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 1]: %v", err)
-	}
-	first, err := base.GetApplyDesire(ctx, id)
-	if err != nil {
-		t.Fatalf("GetApplyDesire after pass 1: %v", err)
-	}
-	firstCond := findCondition(first.Status, desire.TypeSuccessful)
-	if firstCond == nil || firstCond.Status != metav1.ConditionTrue || firstCond.ObservedGeneration != first.Generation {
-		t.Fatalf("first condition = %+v, want success at generation %d", firstCond, first.Generation)
-	}
-	if counting.updateCalls != 1 {
-		t.Fatalf("status writes after pass 1 = %d, want 1", counting.updateCalls)
-	}
+			if err := r.reconcileAll(ctx); err != nil {
+				t.Fatalf("reconcileAll() [pass 1]: %v", err)
+			}
+			first, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after pass 1: %v", err)
+			}
+			requireApplyCondition(t, first, tc.firstStatus, tc.firstReason, first.Generation)
+			if counting.updateCalls != 1 {
+				t.Fatalf("status writes after pass 1 = %d, want 1", counting.updateCalls)
+			}
 
-	updated, err := base.UpdateApplyDesireSpec(
-		ctx, id, desire.ApplySpec{KubeContent: content}, "owner-1", first.Version,
-	)
-	if err != nil {
-		t.Fatalf("UpdateApplyDesireSpec: %v", err)
-	}
-	oldCond := findCondition(updated.Status, desire.TypeSuccessful)
-	if updated.Generation != first.Generation+1 || oldCond == nil || oldCond.ObservedGeneration != first.Generation {
-		t.Fatalf("status after spec update = %+v at generation %d, want prior condition at %d",
-			updated.Status, updated.Generation, first.Generation)
-	}
-	if reconcileErr := r.reconcileAll(ctx); reconcileErr != nil {
-		t.Fatalf("reconcileAll() [pass 2]: %v", reconcileErr)
-	}
-	second, err := base.GetApplyDesire(ctx, id)
-	if err != nil {
-		t.Fatalf("GetApplyDesire after pass 2: %v", err)
-	}
-	secondCond := findCondition(second.Status, desire.TypeSuccessful)
-	if secondCond == nil || secondCond.Status != metav1.ConditionTrue || secondCond.Reason != desire.ReasonApplied ||
-		secondCond.ObservedGeneration != second.Generation {
-		t.Errorf("second condition = %+v, want Applied at generation %d", secondCond, second.Generation)
-	}
-	if counting.updateCalls != 2 {
-		t.Errorf("status writes after new generation = %d, want 2", counting.updateCalls)
-	}
-	if reconcileErr := r.reconcileAll(ctx); reconcileErr != nil {
-		t.Fatalf("reconcileAll() [pass 3]: %v", reconcileErr)
-	}
-	if counting.updateCalls != 2 {
-		t.Errorf("status writes after steady-state pass = %d, want 2", counting.updateCalls)
-	}
-}
+			nextContent := newConfigMapContent(t, manifestName(tc.nextValid), defaultNamespace,
+				map[string]string{"k": tc.nextValue})
+			updated, err := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: nextContent}, "owner-1", first.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireSpec: %v", err)
+			}
+			if updated.Generation != first.Generation+1 {
+				t.Fatalf("Generation after spec update = %d, want %d", updated.Generation, first.Generation+1)
+			}
+			requireApplyCondition(t, updated, tc.firstStatus, tc.firstReason, first.Generation)
+			if !reflect.DeepEqual(updated.Status, first.Status) {
+				t.Fatalf("status after spec update = %+v, want preserved status %+v", updated.Status, first.Status)
+			}
 
-func TestReconcileAll_CurrentGenerationFailureReplacesStaleSuccess(t *testing.T) {
-	ctx := context.Background()
-	const name = "cm-generation-failure"
-	dyn := newFakeDynamicClient(t, newConfigMapObject(name, defaultNamespace))
-	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
-	id := applyIdentity("", "configmaps", defaultNamespace, name)
-	content := newConfigMapContent(t, name, defaultNamespace, map[string]string{"k": "v"})
-	seedApplyDesire(t, store, id, "owner-1", content)
-
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 1]: %v", err)
-	}
-	first, err := store.GetApplyDesire(ctx, id)
-	if err != nil {
-		t.Fatalf("GetApplyDesire after pass 1: %v", err)
-	}
-	badContent := newConfigMapContent(t, "wrong-name", defaultNamespace, map[string]string{"k": "v2"})
-	updated, err := store.UpdateApplyDesireSpec(
-		ctx, id, desire.ApplySpec{KubeContent: badContent}, "owner-1", first.Version,
-	)
-	if err != nil {
-		t.Fatalf("UpdateApplyDesireSpec: %v", err)
-	}
-	stale := findCondition(updated.Status, desire.TypeSuccessful)
-	if stale == nil || stale.Status != metav1.ConditionTrue || stale.ObservedGeneration != first.Generation ||
-		updated.Generation != first.Generation+1 {
-		t.Fatalf("condition after spec update = %+v at generation %d, want retained success at %d",
-			stale, updated.Generation, first.Generation)
-	}
-
-	if reconcileErr := r.reconcileAll(ctx); reconcileErr != nil {
-		t.Fatalf("reconcileAll() [pass 2]: %v", reconcileErr)
-	}
-	got, err := store.GetApplyDesire(ctx, id)
-	if err != nil {
-		t.Fatalf("GetApplyDesire after pass 2: %v", err)
-	}
-	current := findCondition(got.Status, desire.TypeSuccessful)
-	if current == nil || current.Status != metav1.ConditionFalse || current.Reason != desire.ReasonPreCheckFailed ||
-		current.ObservedGeneration != got.Generation {
-		t.Errorf("condition after failed new spec = %+v, want PreCheckFailed at generation %d", current, got.Generation)
+			if err := r.reconcileAll(ctx); err != nil {
+				t.Fatalf("reconcileAll() [pass 2]: %v", err)
+			}
+			second, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after pass 2: %v", err)
+			}
+			if second.Generation != updated.Generation {
+				t.Fatalf("Generation after reconcile = %d, want %d", second.Generation, updated.Generation)
+			}
+			requireApplyCondition(t, second, tc.nextStatus, tc.nextReason, second.Generation)
+			if counting.updateCalls != 2 {
+				t.Fatalf("status writes after new generation = %d, want 2", counting.updateCalls)
+			}
+			if err := r.reconcileAll(ctx); err != nil {
+				t.Fatalf("reconcileAll() [pass 3]: %v", err)
+			}
+			if counting.updateCalls != 2 {
+				t.Errorf("status writes after steady-state pass = %d, want 2", counting.updateCalls)
+			}
+		})
 	}
 }
 

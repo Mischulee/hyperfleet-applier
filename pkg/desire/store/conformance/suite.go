@@ -1138,6 +1138,55 @@ func RunStatusStoreSuite(t *testing.T, newStore func(t *testing.T) desire.Status
 			}
 		})
 
+		t.Run("StaleStatusWriteAfterSpecUpdateIsRejected", func(t *testing.T) {
+			store := newStore(t)
+			spec := seedSpecStore(t, store)
+			id := identity("cluster-a", desire.TypeApply, "stale-status-after-spec")
+			created, err := spec.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, kubeContentV1))
+			if err != nil {
+				t.Fatalf("CreateApplyDesire: %v", err)
+			}
+			oldCondition := condition(desire.ReasonApplied, metav1.ConditionTrue)
+			oldCondition.ObservedGeneration = created.Generation
+			withStatus, err := store.UpdateApplyDesireStatus(
+				ctx, id, desire.Status{Conditions: []metav1.Condition{oldCondition}}, created.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireStatus: %v", err)
+			}
+			before, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire before spec update: %v", err)
+			}
+			updated, err := spec.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV2)}, ownerA, withStatus.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireSpec: %v", err)
+			}
+			if updated.Generation != withStatus.Generation+1 || updated.Version != withStatus.Version+1 ||
+				!reflect.DeepEqual(updated.Status, before.Status) {
+				t.Fatalf("after spec update = %+v, want advanced counters and preserved status from %+v", updated, before)
+			}
+
+			staleCondition := condition(desire.ReasonKubeAPIError, metav1.ConditionFalse)
+			staleCondition.ObservedGeneration = withStatus.Generation
+			_, err = store.UpdateApplyDesireStatus(
+				ctx, id, desire.Status{Conditions: []metav1.Condition{staleCondition}}, withStatus.Version,
+			)
+			if !errors.Is(err, desire.ErrVersionConflict) {
+				t.Fatalf("stale status update error = %v, want ErrVersionConflict", err)
+			}
+			got, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after stale status update: %v", err)
+			}
+			if got.Generation != updated.Generation || got.Version != updated.Version ||
+				string(got.Spec.KubeContent) != kubeContentV2 || !reflect.DeepEqual(got.Status, updated.Status) {
+				t.Errorf("stale status write changed record: got %+v, want %+v", got, updated)
+			}
+		})
+
 		t.Run("UpdateStatusReturnedValueIsIsolatedFromCallerMutation", func(t *testing.T) {
 			store := newStore(t)
 			spec := seedSpecStore(t, store)
