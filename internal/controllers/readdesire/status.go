@@ -2,11 +2,21 @@ package readdesire
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/util"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
+)
+
+const (
+	metadataField        = "metadata"
+	managedFieldsField   = "managedFields"
+	resourceVersionField = "resourceVersion"
+	generationField      = "generation"
 )
 
 // synced returns a copy of status with the Successful condition set to True,
@@ -71,7 +81,45 @@ func withReadCondition(status desire.ReadStatus, cond metav1.Condition, kubeCont
 
 // readStatusEqual reports whether a and b are equal for the purpose of
 // suppressing a redundant status write: same conditions (via util.Equal)
-// and byte-identical KubeContent.
+// and semantically identical KubeContent. Kubernetes-managed metadata is
+// ignored when comparing content, but the raw observed content remains in
+// the status that is written.
 func readStatusEqual(a, b desire.ReadStatus) bool {
-	return util.Equal(a.Status, b.Status) && bytes.Equal(a.KubeContent, b.KubeContent)
+	return util.Equal(a.Status, b.Status) && semanticContentEqual(a.KubeContent, b.KubeContent)
+}
+
+func semanticContentEqual(a, b []byte) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+
+	canonicalA, okA := canonicalContent(a)
+	canonicalB, okB := canonicalContent(b)
+	return okA && okB && bytes.Equal(canonicalA, canonicalB)
+}
+
+// canonicalContent returns canonical JSON with Kubernetes-managed metadata
+// removed. An invalid persisted value is deliberately treated as different by
+// the caller, allowing the next valid observation to replace it.
+func canonicalContent(content []byte) ([]byte, bool) {
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	if metadata, ok := object[metadataField].(map[string]any); ok {
+		delete(metadata, managedFieldsField)
+		delete(metadata, resourceVersionField)
+		delete(metadata, generationField)
+	}
+	normalized, err := json.Marshal(object)
+	if err != nil {
+		return nil, false
+	}
+	return normalized, true
 }

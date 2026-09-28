@@ -157,11 +157,13 @@ that shared path, because GVR resolution and per-object observation happen in di
    `KubeContent` (a transient read failure shouldn't erase the last known good mirror). Otherwise
    records `ReasonSynced` with the freshly marshaled object as `KubeContent`.
 3. `readStatusEqual` compares the freshly observed status against the fetched desire's current
-   status (conditions *and* `KubeContent` - `util.Equal` alone doesn't cover the latter) and skips
-   the write entirely if nothing changed. `UpdateReadDesireStatus` is still a real Redis
-   `WATCH`/`MULTI`/`EXEC` write - an unconditional write on every 60s resync tick would still
-   generate needless Redis load and replication traffic for objects that haven't actually changed,
-   so the no-op check earns its keep on that basis.
+   status (conditions *and* semantically canonicalized `KubeContent` - `util.Equal` alone doesn't
+   cover the latter). The canonical comparison removes Kubernetes-managed
+   `metadata.managedFields`, `metadata.resourceVersion`, and `metadata.generation`; raw observed
+   content is still what gets persisted. It skips the write entirely if nothing changed.
+   `UpdateReadDesireStatus` is still a real Redis `WATCH`/`MULTI`/`EXEC` write - an unconditional
+   write on every 60s resync tick would still generate needless Redis load and replication traffic
+   for objects that haven't actually changed, so the no-op check earns its keep on that basis.
 4. `UpdateReadDesireStatus(ctx, id, newStatus)` - per `pkg/desire/CLAUDE.md`, each desire type is
    its own independent record with its own `Version` now, so a Read status write has no
    cross-desire-type CAS concern to get wrong the way it would if Apply/Delete/Read still shared one
@@ -174,9 +176,13 @@ Reported to status (via `applyStatus`): `observe`/`observeLive`'s outcomes
 Log-only, by necessity rather than oversight: `ListReadDesires` failing in `pollOnce`
 (partition-wide, not attributable to one desire - same as `applydesire.reconcileAll`'s own
 `ListApplyDesires` failure), `GetReadDesire` failing inside `applyStatus` (nothing to compute a new
-status against if the read itself failed), and `UpdateReadDesireStatus` itself failing (can't record
-a status-write failure into the write that's failing - it's retried via the workqueue instead, same
-as any other `sync` error).
+status against if the read itself failed). `UpdateReadDesireStatus` itself failing cannot be written
+into the status update that failed; it increments the process-local `failed` write counter and is
+returned through the workqueue retry path when called by `sync`; `processNextWorkItem` then uses
+`AddRateLimited`. When called by `pollOnce`, the failure is logged and the next poll can retry it;
+`pollOnce` and `InformerManager.Reconcile` do not call `queue.Add` themselves. The controller also
+tracks process-local `skipped` and `performed` write counters; Prometheus exposure is deferred to
+HYPERFLEET-1722.
 
 ## Operational semantics (MVP)
 
