@@ -80,14 +80,16 @@ Create full container image name
 Validate required values
 */}}
 {{- define "hyperfleet-applier.validateValues" -}}
+{{- if not .Values.applier.configOverride }}
 {{- if not .Values.applier.managementCluster }}
-{{- fail "applier.managementCluster is required" }}
+{{- fail "applier.managementCluster is required (or provide applier.configOverride)" }}
 {{- end }}
 {{- if not .Values.applier.pollInterval }}
-{{- fail "applier.pollInterval is required" }}
+{{- fail "applier.pollInterval is required (or provide applier.configOverride)" }}
 {{- end }}
-{{- if not .Values.redis.address }}
-{{- fail "redis.address is required" }}
+{{- if not .Values.redis.url }}
+{{- fail "redis.url is required (or provide applier.configOverride)" }}
+{{- end }}
 {{- end }}
 {{- if and .Values.rbac.create (not .Values.rbac.devModeWildcard) (not .Values.rbac.allowlist) }}
 {{- fail "rbac.allowlist must not be empty when rbac.create=true and rbac.devModeWildcard=false. Populate an explicit GVR allowlist, or set rbac.devModeWildcard=true for local/dev only (see chart README warning)." }}

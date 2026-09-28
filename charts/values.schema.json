@@ -17,6 +17,18 @@
           "description": "Polling interval for reconciliation loops (e.g., \"5s\", \"1m\") (required)",
           "title": "pollInterval",
           "type": "string"
+        },
+        "discoveryRefreshInterval": {
+          "default": "30s",
+          "description": "Interval between Kubernetes discovery cache refreshes (default: \"30s\")",
+          "title": "discoveryRefreshInterval",
+          "type": "string"
+        },
+        "configOverride": {
+          "default": "",
+          "description": "Raw config.yaml content that replaces the template-generated ConfigMap. When set, applier.managementCluster, applier.pollInterval, and redis.url are ignored.",
+          "title": "configOverride",
+          "type": "string"
         }
       },
       "required": [
@@ -189,17 +201,48 @@
       "additionalProperties": false,
       "description": "Redis store configuration (required - applier will fail to start without Redis)",
       "properties": {
-        "address": {
+        "url": {
           "default": "",
-          "description": "Redis server address in format \"host:port\" (required)",
-          "title": "address",
+          "description": "Redis connection URL (required)",
+          "title": "url",
           "type": "string"
         }
       },
       "required": [
-        "address"
+        "url"
       ],
       "title": "redis",
+      "type": "object"
+    },
+    "log": {
+      "additionalProperties": false,
+      "description": "Logging configuration",
+      "properties": {
+        "level": {
+          "default": "info",
+          "description": "Log level (e.g., \"info\", \"debug\", \"warn\", \"error\")",
+          "title": "level",
+          "type": "string"
+        },
+        "format": {
+          "default": "json",
+          "description": "Log format (\"json\" or \"text\")",
+          "title": "format",
+          "type": "string"
+        },
+        "output": {
+          "default": "stdout",
+          "description": "Log output destination (\"stdout\" or \"stderr\")",
+          "title": "output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "format",
+        "output"
+      ],
+      "title": "log",
       "type": "object"
     },
     "replicaCount": {
@@ -360,7 +403,8 @@
     "replicaCount",
     "image",
     "applier",
-    "redis"
+    "redis",
+    "log"
   ],
   "type": "object"
 }

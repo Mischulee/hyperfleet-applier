@@ -19,7 +19,7 @@ DEFAULT_SETS=(
   --set image.tag=test
   --set applier.managementCluster=test-cluster
   --set applier.pollInterval=5s
-  --set redis.address=redis:6379
+  --set redis.url=redis://redis:6379/0
 )
 
 PASSED=0
@@ -134,6 +134,88 @@ fi
 
 echo "$OUTPUT" | kubeconform_validate
 pass "devModeWildcard template"
+
+# ─── Container spec tests ────────────────────────────────────────────
+
+run_test "container args include serve subcommand"
+
+OUTPUT=$(render --set rbac.devModeWildcard=true)
+
+assert_contains "$OUTPUT" 'args:' \
+  "args field not found in rendered deployment"
+assert_contains "$OUTPUT" 'serve' \
+  "serve subcommand not found in container args"
+
+pass "Container args include serve subcommand"
+
+# ─── ConfigMap tests ──────────────────────────────────────────────────
+
+run_test "ConfigMap renders config.yaml from values"
+
+OUTPUT=$(render --set rbac.devModeWildcard=true)
+
+assert_contains "$OUTPUT" 'kind: ConfigMap' \
+  "ConfigMap not found in rendered output"
+assert_contains "$OUTPUT" 'management_cluster: "test-cluster"' \
+  "management_cluster not found in ConfigMap"
+assert_contains "$OUTPUT" 'poll_interval: "5s"' \
+  "poll_interval not found in ConfigMap"
+assert_contains "$OUTPUT" 'url: "redis://redis:6379/0"' \
+  "redis url not found in ConfigMap"
+assert_contains "$OUTPUT" 'discovery_refresh_interval:' \
+  "discovery_refresh_interval not found in ConfigMap"
+
+pass "ConfigMap renders config.yaml from values"
+
+run_test "Deployment mounts ConfigMap at /etc/hyperfleet"
+
+OUTPUT=$(render --set rbac.devModeWildcard=true)
+
+assert_contains "$OUTPUT" 'mountPath: /etc/hyperfleet' \
+  "ConfigMap volume mount not found in deployment"
+assert_contains "$OUTPUT" 'readOnly: true' \
+  "ConfigMap mount should be read-only"
+
+pass "Deployment mounts ConfigMap"
+
+run_test "configOverride replaces template-generated config"
+
+OVERRIDE_CONTENT="management_cluster: override-cluster
+poll_interval: 10s
+log:
+  level: debug
+  format: json
+  output: stdout
+clients:
+  redis:
+    url: redis://custom:6379/0"
+
+OUTPUT=$(render \
+  --set rbac.devModeWildcard=true \
+  --set "applier.configOverride=$OVERRIDE_CONTENT")
+
+assert_contains "$OUTPUT" 'override-cluster' \
+  "configOverride content not found in rendered ConfigMap"
+assert_not_contains "$OUTPUT" 'management_cluster: "test-cluster"' \
+  "template-generated management_cluster should not appear when configOverride is set"
+
+pass "configOverride replaces template-generated config"
+
+run_test "configOverride skips value validation"
+
+if OUTPUT=$(render \
+  --set rbac.devModeWildcard=true \
+  --set applier.managementCluster="" \
+  --set applier.pollInterval="" \
+  --set redis.url="" \
+  --set "applier.configOverride=management_cluster: from-file" 2>&1); then
+  assert_contains "$OUTPUT" 'from-file' \
+    "configOverride content not found when individual values are empty"
+else
+  fail "configOverride should bypass validation of individual values"
+fi
+
+pass "configOverride skips value validation"
 
 # ─── Validation failure tests ─────────────────────────────────────────
 

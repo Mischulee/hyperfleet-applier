@@ -33,7 +33,12 @@ HyperFleet Applier - Kubernetes controller for reconciling ApplyDesire and Delet
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | applier.managementCluster | string | `""` | Management cluster identifier - must match the partition this applier instance manages (required) |
 | applier.pollInterval | string | `""` | Polling interval for reconciliation loops (e.g., "5s", "1m") (required) |
-| redis.address | string | `""` | Redis server address in format "host:port" (required) |
+| applier.discoveryRefreshInterval | string | `"30s"` | Interval between Kubernetes discovery cache refreshes (default: "30s") |
+| applier.configOverride | string | `""` | Raw config.yaml content that replaces the template-generated ConfigMap. When set, applier.managementCluster, applier.pollInterval, and redis.url are ignored — the provided content is mounted verbatim. Example: --set-file applier.configOverride=configs/applier.yaml |
+| redis.url | string | `""` | Redis connection URL (required) |
+| log.level | string | `"info"` | Log level (e.g., "info", "debug", "warn", "error") |
+| log.format | string | `"json"` | Log format ("json" or "text") |
+| log.output | string | `"stdout"` | Log output destination ("stdout" or "stderr") |
 
 ## Deriving the RBAC allowlist
 

@@ -90,9 +90,25 @@ applier:
   managementCluster: ""
   # -- Polling interval for reconciliation loops (e.g., "5s", "1m") (required)
   pollInterval: ""
+  # -- Interval between Kubernetes discovery cache refreshes (default: "30s")
+  discoveryRefreshInterval: "30s"
+  # -- Raw config.yaml content that replaces the template-generated ConfigMap.
+  # When set, applier.managementCluster, applier.pollInterval, and redis.url
+  # are ignored — the provided content is mounted verbatim.
+  # Example: --set-file applier.configOverride=configs/applier.yaml
+  configOverride: ""
 
 # Redis store configuration (required - applier will fail to start without Redis)
 redis:
-  # -- Redis server address in format "host:port" (required)
-  address: ""
+  # -- Redis connection URL (required)
+  url: ""
+
+# Logging configuration
+log:
+  # -- Log level (e.g., "info", "debug", "warn", "error")
+  level: "info"
+  # -- Log format ("json" or "text")
+  format: "json"
+  # -- Log output destination ("stdout" or "stderr")
+  output: "stdout"
 

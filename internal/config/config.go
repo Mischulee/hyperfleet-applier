@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -108,7 +109,9 @@ func LoadConfig(configFile string, flags *pflag.FlagSet) (*Config, error) {
 	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.SetConfigFile(configFile)
 	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
 	}
 
 	for configPath, envSuffix := range viperKeyMappings {

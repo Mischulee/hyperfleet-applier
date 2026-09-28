@@ -39,12 +39,14 @@ spec:
           {{- end }}
           image: {{ include "hyperfleet-applier.fullImageName" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: REDIS_ADDRESS
-              value: {{ .Values.redis.address | quote }}
-            - name: POLL_INTERVAL
-              value: {{ .Values.applier.pollInterval | quote }}
-            - name: MANAGEMENT_CLUSTER
-              value: {{ .Values.applier.managementCluster | quote }}
+          args: ["serve"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hyperfleet
+              readOnly: true
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "hyperfleet-applier.fullname" . }}

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hyperfleet-applier.fullname" . }}
+  labels:
+    {{- include "hyperfleet-applier.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{- if .Values.applier.configOverride }}
+{{ .Values.applier.configOverride | indent 4 }}
+{{- else }}
+    management_cluster: {{ .Values.applier.managementCluster | quote }}
+    poll_interval: {{ .Values.applier.pollInterval | quote }}
+    discovery_refresh_interval: {{ .Values.applier.discoveryRefreshInterval | default "30s" | quote }}
+    log:
+      level: {{ .Values.log.level | default "info" | quote }}
+      format: {{ .Values.log.format | default "json" | quote }}
+      output: {{ .Values.log.output | default "stdout" | quote }}
+    clients:
+      redis:
+        url: {{ .Values.redis.url | quote }}
+      kubernetes:
+        kube_config_path: ""
+{{- end }}
