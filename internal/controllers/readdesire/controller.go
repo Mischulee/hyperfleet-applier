@@ -75,6 +75,7 @@ type Controller struct {
 	pollInterval      time.Duration
 	skippedWrites     atomic.Uint64
 	performedWrites   atomic.Uint64
+	failedWrites      atomic.Uint64
 }
 
 // Option configures optional Controller behavior.
@@ -94,6 +95,12 @@ func (c *Controller) SkippedStatusWrites() uint64 {
 // ReadDesire status updates.
 func (c *Controller) PerformedStatusWrites() uint64 {
 	return c.performedWrites.Load()
+}
+
+// FailedStatusWrites returns the number of ReadDesire status updates that
+// failed.
+func (c *Controller) FailedStatusWrites() uint64 {
+	return c.failedWrites.Load()
 }
 
 // WithInformerSyncTimeout overrides the default timeout for waiting on a

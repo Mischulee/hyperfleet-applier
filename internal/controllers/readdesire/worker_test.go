@@ -57,7 +57,7 @@ func (c *countingStatusStore) UpdateReadDesireStatus(
 
 func assertStatusWriteCounts(
 	t *testing.T, store *countingStatusStore, controller *Controller,
-	wantUpdates int, wantPerformed, wantSkipped uint64,
+	wantUpdates int, wantPerformed, wantSkipped, wantFailed uint64,
 ) {
 	t.Helper()
 	if store.updateCalls != wantUpdates {
@@ -68,6 +68,9 @@ func assertStatusWriteCounts(
 	}
 	if got := controller.SkippedStatusWrites(); got != wantSkipped {
 		t.Errorf("skipped status writes = %d, want %d", got, wantSkipped)
+	}
+	if got := controller.FailedStatusWrites(); got != wantFailed {
+		t.Errorf("failed status writes = %d, want %d", got, wantFailed)
 	}
 }
 
@@ -82,6 +85,25 @@ func (e *erroringStatusStore) UpdateReadDesireStatus(
 ) (desire.ReadDesire, error) {
 	return desire.ReadDesire{}, e.err
 }
+
+// flakyStatusStore fails the first update and delegates subsequent updates to
+// the underlying store, modeling a transient backend failure.
+type flakyStatusStore struct {
+	statusStore
+	remainingFailures int
+}
+
+func (f *flakyStatusStore) UpdateReadDesireStatus(
+	ctx context.Context, id desire.Identity, status desire.ReadStatus,
+) (desire.ReadDesire, error) {
+	if f.remainingFailures > 0 {
+		f.remainingFailures--
+		return desire.ReadDesire{}, errTransientUpdate
+	}
+	return f.statusStore.UpdateReadDesireStatus(ctx, id, status)
+}
+
+var errTransientUpdate = errors.New("temporary status store outage")
 
 // getErroringStatusStore fails every GetReadDesire call with err - used to
 // drive sync() into returning a specific error (including context.Canceled/
@@ -235,12 +257,12 @@ func TestSync_UnchangedObjectSuppressesStatusWrite(t *testing.T) {
 	if err := c.sync(ctx, id); err != nil {
 		t.Fatalf("sync() [1st] error = %v, want nil", err)
 	}
-	assertStatusWriteCounts(t, counting, c, 1, 1, 0)
+	assertStatusWriteCounts(t, counting, c, 1, 1, 0, 0)
 
 	if err := c.sync(ctx, id); err != nil {
 		t.Fatalf("sync() [2nd] error = %v, want nil", err)
 	}
-	assertStatusWriteCounts(t, counting, c, 1, 1, 1)
+	assertStatusWriteCounts(t, counting, c, 1, 1, 1, 0)
 }
 
 func TestSync_ServerMetadataChangeSuppressesStatusWrite(t *testing.T) {
@@ -284,7 +306,7 @@ func TestSync_ServerMetadataChangeSuppressesStatusWrite(t *testing.T) {
 				t.Fatalf("sync() [server metadata change] error = %v, want nil", err)
 			}
 
-			assertStatusWriteCounts(t, counting, second, 0, 0, 1)
+			assertStatusWriteCounts(t, counting, second, 0, 0, 1, 0)
 		})
 	}
 }
@@ -310,7 +332,7 @@ func TestSync_MeaningfulObjectChangeWritesStatus(t *testing.T) {
 		t.Fatalf("sync() [changed] error = %v, want nil", err)
 	}
 
-	assertStatusWriteCounts(t, counting, second, 1, 1, 0)
+	assertStatusWriteCounts(t, counting, second, 1, 1, 0, 0)
 }
 
 // TestSync_UpdateFailureIsPropagatedForRetry proves that any
@@ -340,6 +362,45 @@ func TestSync_UpdateFailureIsPropagatedForRetry(t *testing.T) {
 	}
 	if got := c.SkippedStatusWrites(); got != 0 {
 		t.Errorf("skipped status writes after failed update = %d, want 0", got)
+	}
+	if got := c.FailedStatusWrites(); got != 1 {
+		t.Errorf("failed status writes after failed update = %d, want 1", got)
+	}
+}
+
+func TestSync_TransientUpdateFailureThenSuccessCountsBothOutcomes(t *testing.T) {
+	ctx := context.Background()
+	base := memory.New()
+	id := readIdentity("default", "cm-transient-update")
+	seedReadDesire(t, base, id, "owner-1")
+
+	flaky := &flakyStatusStore{statusStore: base, remainingFailures: 2}
+	obj := newUnstructuredConfigMap("cm-transient-update", "default", map[string]any{"k": "v"})
+	c := New(base, flaky, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
+
+	if err := c.sync(ctx, id); !errors.Is(err, errTransientUpdate) {
+		t.Fatalf("sync() [failed attempt] error = %v, want it to wrap %v", err, errTransientUpdate)
+	}
+	if got := c.FailedStatusWrites(); got != 1 {
+		t.Fatalf("failed status writes after first attempt = %d, want 1", got)
+	}
+
+	if err := c.sync(ctx, id); !errors.Is(err, errTransientUpdate) {
+		t.Fatalf("sync() [second failed attempt] error = %v, want it to wrap %v", err, errTransientUpdate)
+	}
+	if got := c.FailedStatusWrites(); got != 2 {
+		t.Fatalf("failed status writes after second attempt = %d, want 2", got)
+	}
+
+	if err := c.sync(ctx, id); err != nil {
+		t.Fatalf("sync() [retry] error = %v, want nil", err)
+	}
+	if got := c.FailedStatusWrites(); got != 2 {
+		t.Errorf("failed status writes after successful retry = %d, want 2", got)
+	}
+	if got := c.PerformedStatusWrites(); got != 1 {
+		t.Errorf("performed status writes after successful retry = %d, want 1", got)
 	}
 }
 
@@ -524,5 +585,35 @@ func TestProcessNextWorkItem_GenericErrorRetries(t *testing.T) {
 
 	if n := queue.NumRequeues(id); n != 1 {
 		t.Errorf("NumRequeues = %d, want 1: a generic sync failure must be retried with backoff", n)
+	}
+}
+
+// TestProcessNextWorkItem_UpdateFailureRetries verifies that a status-store
+// update failure is returned through the workqueue retry path, not only from
+// a direct sync call.
+func TestProcessNextWorkItem_UpdateFailureRetries(t *testing.T) {
+	ctx := context.Background()
+	base := memory.New()
+	id := readIdentity("default", "cm-update-retry")
+	seedReadDesire(t, base, id, "owner-1")
+	updateErr := errors.New("status store unavailable")
+	failing := &erroringStatusStore{statusStore: base, err: updateErr}
+	obj := newUnstructuredConfigMap("cm-update-retry", "default", map[string]any{"k": "v"})
+
+	c := New(base, failing, newFakeDynamicClient(t), newTestMapper(), testManagementCluster, time.Hour)
+	seedInformer(c, id, newLister(t, configMapGVR, obj), true)
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[desire.Identity]())
+	defer queue.ShutDown()
+	c.queue = queue
+	queue.Add(id)
+
+	if !c.processNextWorkItem(ctx) {
+		t.Fatal("processNextWorkItem() = false, want true (queue not shut down)")
+	}
+	if n := queue.NumRequeues(id); n != 1 {
+		t.Errorf("NumRequeues = %d, want 1: status update failure must trigger a retry", n)
+	}
+	if got := c.FailedStatusWrites(); got != 1 {
+		t.Errorf("failed status writes = %d, want 1", got)
 	}
 }
