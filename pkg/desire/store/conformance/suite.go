@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,6 +85,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			store := newStore(t)
 			id := identity("cluster-a", desire.TypeApply, "cm-1")
 			d := newApplyDesire(id, ownerA, `{"kind":"ConfigMap"}`)
+			d.Generation = 99 // Generation is store-owned, not caller-supplied.
 
 			created, err := store.CreateApplyDesire(ctx, d)
 			if err != nil {
@@ -92,6 +94,9 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if created.Version != 1 {
 				t.Errorf("expected Version == 1 after Create, got %d", created.Version)
 			}
+			if created.Generation != 1 {
+				t.Errorf("expected Generation == 1 after Create, got %d", created.Generation)
+			}
 
 			got, err := store.GetApplyDesire(ctx, id)
 			if err != nil {
@@ -99,6 +104,9 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			}
 			if got.Version != created.Version {
 				t.Errorf("expected Get to return same Version as Create, got %d vs %d", got.Version, created.Version)
+			}
+			if got.Generation != created.Generation {
+				t.Errorf("expected Get to return same Generation as Create, got %d vs %d", got.Generation, created.Generation)
 			}
 		})
 
@@ -177,6 +185,13 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err == nil {
 				t.Fatal("expected UpdateApplyDesireSpec to reject empty KubeContent")
 			}
+			got, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after rejected update: %v", err)
+			}
+			if got.Generation != created.Generation || got.Version != created.Version {
+				t.Errorf("rejected update changed counters: got Generation=%d Version=%d", got.Generation, got.Version)
+			}
 		})
 
 		t.Run("RecreateAfterDeleteClearsStatus", func(t *testing.T) {
@@ -214,6 +229,9 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if len(recreated.Status.Conditions) != 0 {
 				t.Fatalf("expected recreated Apply to have empty status, got %+v", recreated.Status.Conditions)
 			}
+			if recreated.Generation != 1 {
+				t.Fatalf("expected recreated Apply to start at Generation 1, got %d", recreated.Generation)
+			}
 		})
 
 		t.Run("GetMissingReturnsNotFound", func(t *testing.T) {
@@ -247,39 +265,109 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 					created.Version, updated.Version,
 				)
 			}
+			if updated.Generation != created.Generation+1 {
+				t.Errorf("expected Generation %d after spec update, got %d", created.Generation+1, updated.Generation)
+			}
 		})
 
-		t.Run("UpdateSpecClearsStatus", func(t *testing.T) {
+		t.Run("EachAcceptedSpecWriteAdvancesGeneration", func(t *testing.T) {
 			store := newStore(t)
-			statusStore, ok := store.(desire.StatusStore)
-			if !ok {
-				t.Fatalf("store must also implement desire.StatusStore")
-			}
-			id := identity("cluster-a", desire.TypeApply, "status-clear-on-update")
-
-			created, err := store.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, `{"v":1}`))
+			id := identity("cluster-a", desire.TypeApply, "generation-writes")
+			created, err := store.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, kubeContentV1))
 			if err != nil {
 				t.Fatalf("CreateApplyDesire: %v", err)
 			}
-			withStatus, err := statusStore.UpdateApplyDesireStatus(
-				ctx, id,
-				desire.Status{Conditions: []metav1.Condition{condition(desire.ReasonApplied, metav1.ConditionTrue)}},
-				created.Version,
+			first, err := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV1)}, ownerA, created.Version,
 			)
 			if err != nil {
-				t.Fatalf("UpdateApplyDesireStatus: %v", err)
+				t.Fatalf("UpdateApplyDesireSpec with identical content: %v", err)
 			}
+			second, err := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV2)}, ownerA, first.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireSpec with new content: %v", err)
+			}
+			if first.Generation != created.Generation+1 || second.Generation != first.Generation+1 {
+				t.Errorf("generations across accepted writes = %d, %d, %d; want 1, 2, 3",
+					created.Generation, first.Generation, second.Generation)
+			}
+			if _, updateErr := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV1)}, ownerA, first.Version,
+			); !errors.Is(updateErr, desire.ErrVersionConflict) {
+				t.Fatalf("stale spec update error = %v, want ErrVersionConflict", updateErr)
+			}
+			got, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after rejected update: %v", err)
+			}
+			if got.Generation != second.Generation || got.Version != second.Version {
+				t.Errorf("rejected update changed counters: got Generation=%d Version=%d", got.Generation, got.Version)
+			}
+		})
 
-			updated, err := store.UpdateApplyDesireSpec(
-				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV2)}, ownerA, withStatus.Version,
-			)
-			if err != nil {
-				t.Fatalf("UpdateApplyDesireSpec: %v", err)
-			}
-			if len(updated.Status.Conditions) != 0 {
-				t.Fatalf(
-					"expected status cleared after spec update, got %+v", updated.Status.Conditions,
-				)
+		t.Run("UpdateSpecPreservesStatus", func(t *testing.T) {
+			for _, tc := range []struct {
+				name   string
+				status desire.Status
+			}{
+				{
+					name: "PreviousSuccess",
+					status: desire.Status{Conditions: []metav1.Condition{{
+						Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+						Reason: desire.ReasonApplied, ObservedGeneration: 1,
+						LastTransitionTime: metav1.Now(),
+					}}},
+				},
+				{
+					name: "PreviousFailure",
+					status: desire.Status{Conditions: []metav1.Condition{{
+						Type: desire.TypeSuccessful, Status: metav1.ConditionFalse,
+						Reason: desire.ReasonKubeAPIError, Message: "previous API failure",
+						ObservedGeneration: 1, LastTransitionTime: metav1.Now(),
+					}}},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					store := newStore(t)
+					statusStore, ok := store.(desire.StatusStore)
+					if !ok {
+						t.Fatal("store must also implement desire.StatusStore")
+					}
+					id := identity("cluster-a", desire.TypeApply, "status-preserved-on-update")
+					created, err := store.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, kubeContentV1))
+					if err != nil {
+						t.Fatalf("CreateApplyDesire: %v", err)
+					}
+					withStatus, err := statusStore.UpdateApplyDesireStatus(ctx, id, tc.status, created.Version)
+					if err != nil {
+						t.Fatalf("UpdateApplyDesireStatus: %v", err)
+					}
+					before, err := store.GetApplyDesire(ctx, id)
+					if err != nil {
+						t.Fatalf("GetApplyDesire before spec update: %v", err)
+					}
+					updated, err := store.UpdateApplyDesireSpec(
+						ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV2)}, ownerA, withStatus.Version,
+					)
+					if err != nil {
+						t.Fatalf("UpdateApplyDesireSpec: %v", err)
+					}
+					if updated.Generation != created.Generation+1 {
+						t.Errorf("Generation = %d, want %d", updated.Generation, created.Generation+1)
+					}
+					if !reflect.DeepEqual(updated.Status, before.Status) {
+						t.Errorf("spec update changed prior status: got %+v, want %+v", updated.Status, before.Status)
+					}
+					got, err := store.GetApplyDesire(ctx, id)
+					if err != nil {
+						t.Fatalf("GetApplyDesire: %v", err)
+					}
+					if !reflect.DeepEqual(got.Status, before.Status) {
+						t.Errorf("persisted status changed after spec update: got %+v, want %+v", got.Status, before.Status)
+					}
+				})
 			}
 		})
 
@@ -348,6 +436,13 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if !errors.Is(err, desire.ErrOwnerConflict) {
 				t.Fatalf("expected ErrOwnerConflict for a different owner, got %v", err)
 			}
+			got, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after owner conflict: %v", err)
+			}
+			if got.Generation != created.Generation || got.Version != created.Version {
+				t.Errorf("owner conflict changed counters: got Generation=%d Version=%d", got.Generation, got.Version)
+			}
 		})
 
 		t.Run("DeleteSuccess", func(t *testing.T) {
@@ -371,20 +466,25 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 		t.Run("CreateGetRoundTrip", func(t *testing.T) {
 			store := newStore(t)
 			id := identity("cluster-a", desire.TypeDelete, "del-1")
+			d := newDeleteDesire(id, ownerA)
+			d.Generation = 99
 
-			created, err := store.CreateDeleteDesire(ctx, newDeleteDesire(id, ownerA))
+			created, err := store.CreateDeleteDesire(ctx, d)
 			if err != nil {
 				t.Fatalf("CreateDeleteDesire: %v", err)
 			}
 			if created.Version != 1 {
 				t.Errorf("expected Version == 1 after Create, got %d", created.Version)
 			}
+			if created.Generation != 1 {
+				t.Errorf("expected Generation == 1 after Create, got %d", created.Generation)
+			}
 
 			got, err := store.GetDeleteDesire(ctx, id)
 			if err != nil {
 				t.Fatalf("GetDeleteDesire: %v", err)
 			}
-			if got.Identity != id || got.Owner != ownerA {
+			if got.Identity != id || got.Owner != ownerA || got.Generation != created.Generation {
 				t.Errorf("round-tripped desire mismatch: %+v", got)
 			}
 		})
@@ -440,20 +540,25 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 		t.Run("CreateGetRoundTrip", func(t *testing.T) {
 			store := newStore(t)
 			id := identity("cluster-a", desire.TypeRead, "read-1")
+			d := newReadDesire(id, ownerA)
+			d.Generation = 99
 
-			created, err := store.CreateReadDesire(ctx, newReadDesire(id, ownerA))
+			created, err := store.CreateReadDesire(ctx, d)
 			if err != nil {
 				t.Fatalf("CreateReadDesire: %v", err)
 			}
 			if created.Version != 1 {
 				t.Errorf("expected Version == 1 after Create, got %d", created.Version)
 			}
+			if created.Generation != 1 {
+				t.Errorf("expected Generation == 1 after Create, got %d", created.Generation)
+			}
 
 			got, err := store.GetReadDesire(ctx, id)
 			if err != nil {
 				t.Fatalf("GetReadDesire: %v", err)
 			}
-			if got.Identity != id || got.Owner != ownerA {
+			if got.Identity != id || got.Owner != ownerA || got.Generation != created.Generation {
 				t.Errorf("round-tripped desire mismatch: %+v", got)
 			}
 		})
@@ -522,7 +627,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListApplyDesires(cluster-a): %v", err)
 			}
-			if len(listA) != 1 || listA[0].Identity != idA {
+			if len(listA) != 1 || listA[0].Identity != idA || listA[0].Generation != 1 {
 				t.Fatalf("expected only cluster-a's desire, got %+v", listA)
 			}
 
@@ -530,7 +635,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListApplyDesires(cluster-b): %v", err)
 			}
-			if len(listB) != 1 || listB[0].Identity != idB {
+			if len(listB) != 1 || listB[0].Identity != idB || listB[0].Generation != 1 {
 				t.Fatalf("expected only cluster-b's desire, got %+v", listB)
 			}
 		})
@@ -551,7 +656,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListDeleteDesires(cluster-a): %v", err)
 			}
-			if len(listA) != 1 || listA[0].Identity != idA {
+			if len(listA) != 1 || listA[0].Identity != idA || listA[0].Generation != 1 {
 				t.Fatalf("expected only cluster-a's desire, got %+v", listA)
 			}
 
@@ -559,7 +664,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListDeleteDesires(cluster-b): %v", err)
 			}
-			if len(listB) != 1 || listB[0].Identity != idB {
+			if len(listB) != 1 || listB[0].Identity != idB || listB[0].Generation != 1 {
 				t.Fatalf("expected only cluster-b's desire, got %+v", listB)
 			}
 		})
@@ -580,7 +685,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListReadDesires(cluster-a): %v", err)
 			}
-			if len(listA) != 1 || listA[0].Identity != idA {
+			if len(listA) != 1 || listA[0].Identity != idA || listA[0].Generation != 1 {
 				t.Fatalf("expected only cluster-a's desire, got %+v", listA)
 			}
 
@@ -588,7 +693,7 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			if err != nil {
 				t.Fatalf("ListReadDesires(cluster-b): %v", err)
 			}
-			if len(listB) != 1 || listB[0].Identity != idB {
+			if len(listB) != 1 || listB[0].Identity != idB || listB[0].Generation != 1 {
 				t.Fatalf("expected only cluster-b's desire, got %+v", listB)
 			}
 		})
@@ -1028,6 +1133,9 @@ func RunStatusStoreSuite(t *testing.T, newStore func(t *testing.T) desire.Status
 					created.Version, updated.Version,
 				)
 			}
+			if updated.Generation != created.Generation {
+				t.Errorf("status write changed Generation from %d to %d", created.Generation, updated.Generation)
+			}
 		})
 
 		t.Run("UpdateStatusReturnedValueIsIsolatedFromCallerMutation", func(t *testing.T) {
@@ -1105,7 +1213,9 @@ func RunStatusStoreSuite(t *testing.T, newStore func(t *testing.T) desire.Status
 			if string(afterStatus.Spec.KubeContent) != `{"v":1}` {
 				t.Errorf("UpdateApplyDesireStatus must not change Spec, got %q", afterStatus.Spec.KubeContent)
 			}
-			// The reverse direction is not isolated: UpdateApplyDesireSpec clears status.
+			if afterStatus.Generation != created.Generation {
+				t.Errorf("UpdateApplyDesireStatus changed Generation from %d to %d", created.Generation, afterStatus.Generation)
+			}
 		})
 	})
 
@@ -1141,6 +1251,9 @@ func RunStatusStoreSuite(t *testing.T, newStore func(t *testing.T) desire.Status
 					"expected Version to strictly increase after successful status update, got %d -> %d",
 					created.Version, updated.Version,
 				)
+			}
+			if updated.Generation != created.Generation {
+				t.Errorf("delete status write changed Generation from %d to %d", created.Generation, updated.Generation)
 			}
 
 			got, err := store.GetDeleteDesire(ctx, id)
@@ -1237,8 +1350,12 @@ func RunStatusStoreSuite(t *testing.T, newStore func(t *testing.T) desire.Status
 			status := desire.ReadStatus{
 				Status: desire.Status{Conditions: []metav1.Condition{condition(desire.ReasonSynced, metav1.ConditionTrue)}},
 			}
-			if _, err := store.UpdateReadDesireStatus(ctx, id, status); err != nil {
+			updated, err := store.UpdateReadDesireStatus(ctx, id, status)
+			if err != nil {
 				t.Fatalf("UpdateReadDesireStatus: %v", err)
+			}
+			if updated.Generation != 1 {
+				t.Errorf("read status write changed Generation to %d, want 1", updated.Generation)
 			}
 		})
 

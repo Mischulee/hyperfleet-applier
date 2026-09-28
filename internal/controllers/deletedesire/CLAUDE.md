@@ -84,9 +84,7 @@ normal Go callers only.
   in `WaitingForDeletion`.
 - **Delete before status CAS:** DELETE runs before `UpdateDeleteDesireStatus`. If the status write
   loses a version race, the cluster may have deleted the resource while the store hasn't recorded
-  it; the next pass confirms deletion. The per-resource `Version` is shared across Apply/Delete/Read
-  sub-states for the same Kubernetes target, so unrelated store writes can also bump it and trigger
-  benign `ErrVersionConflict` on the delete status path.
+  it; the next pass confirms deletion. Each desire type has its own record and `Version`, so sibling
+  Apply/Read writes do not cause a DeleteDesire status conflict.
 - **Timeouts:** Each GET and DELETE call has a 30-second timeout (`defaultDeleteTimeout`) to prevent
   hung apiserver connections from stalling an entire reconciliation pass.
-

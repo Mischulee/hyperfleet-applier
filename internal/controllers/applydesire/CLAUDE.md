@@ -34,6 +34,12 @@ Per desire, `reconcileOne`/`applyToCluster`:
    desire's `Version` read at list time. A `ErrVersionConflict` here means spec/status moved since
    `ListApplyDesires` - treated as a benign race, not an error; the next `reconcileAll` pass retries.
 
+Every Apply outcome, including `PreCheckFailed` before any Kubernetes call, stamps the listed
+desire's `Generation` into `Successful.ObservedGeneration`. `UpdateApplyDesireSpec` retains prior
+status, so a condition with an older observed generation remains available as the last known
+outcome while the new spec awaits reconciliation. A condition at the current generation reports
+the current attempt. `Version` is still used for the status CAS; generation is not a CAS token.
+
 The reconciler reads intent and writes status only. `conditions.Equal` (ignoring
 `LastTransitionTime`) suppresses no-op status writes.
 

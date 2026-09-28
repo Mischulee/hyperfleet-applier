@@ -19,6 +19,7 @@ type resourceRecord struct {
 	TargetVersion string
 	ReadStatus    desire.ReadStatus
 	Status        desire.Status
+	Generation    int64
 	Version       int64
 }
 
@@ -84,11 +85,12 @@ func (s *Store) CreateApplyDesire(ctx context.Context, d desire.ApplyDesire) (de
 
 	spec := desire.CloneApplySpec(d.Spec)
 	rec := &resourceRecord{
-		Identity: id,
-		Owner:    d.Owner,
-		OriginID: d.OriginID,
-		Version:  1,
-		Apply:    &spec,
+		Identity:   id,
+		Owner:      d.Owner,
+		OriginID:   d.OriginID,
+		Generation: desire.InitialGeneration,
+		Version:    1,
+		Apply:      &spec,
 	}
 	s.items[id] = rec
 	return s.projectApplyDesire(rec), nil
@@ -137,8 +139,9 @@ func (s *Store) UpdateApplyDesireSpec(
 
 	cloned := desire.CloneApplySpec(spec)
 	rec.Apply = &cloned
-	// Clear status because it described the old spec.
-	rec.Status = desire.Status{}
+	// Keep the previous outcome so readers can see it was observed against an
+	// earlier generation until the applier reconciles this spec.
+	rec.Generation++
 	rec.Version++
 	return s.projectApplyDesire(rec), nil
 }
@@ -190,10 +193,11 @@ func (s *Store) CreateDeleteDesire(ctx context.Context, d desire.DeleteDesire) (
 	delete(s.items, applyID)
 
 	rec := &resourceRecord{
-		Identity: id,
-		Owner:    d.Owner,
-		OriginID: d.OriginID,
-		Version:  1,
+		Identity:   id,
+		Owner:      d.Owner,
+		OriginID:   d.OriginID,
+		Generation: desire.InitialGeneration,
+		Version:    1,
 	}
 	s.items[id] = rec
 	return s.projectDeleteDesire(rec), nil
@@ -261,6 +265,7 @@ func (s *Store) CreateReadDesire(ctx context.Context, d desire.ReadDesire) (desi
 		Owner:         d.Owner,
 		OriginID:      d.OriginID,
 		TargetVersion: d.TargetVersion,
+		Generation:    desire.InitialGeneration,
 		Version:       1,
 	}
 	s.items[id] = rec
@@ -438,12 +443,13 @@ func (s *Store) projectApplyDesire(rec *resourceRecord) desire.ApplyDesire {
 		return desire.ApplyDesire{}
 	}
 	return desire.ApplyDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Spec:     desire.CloneApplySpec(*rec.Apply),
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Spec:       desire.CloneApplySpec(*rec.Apply),
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -452,11 +458,12 @@ func (s *Store) projectDeleteDesire(rec *resourceRecord) desire.DeleteDesire {
 		return desire.DeleteDesire{}
 	}
 	return desire.DeleteDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -469,6 +476,7 @@ func (s *Store) projectReadDesire(rec *resourceRecord) desire.ReadDesire {
 		Owner:         rec.Owner,
 		OriginID:      rec.OriginID,
 		TargetVersion: rec.TargetVersion,
+		Generation:    rec.Generation,
 		Version:       rec.Version,
 		Status:        desire.CloneReadStatus(rec.ReadStatus),
 	}

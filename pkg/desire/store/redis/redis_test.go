@@ -12,6 +12,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/conformance"
@@ -115,6 +116,89 @@ func TestUpdateApplyDesireSpec_ConcurrentCAS(t *testing.T) {
 	}
 	if got.Version != created.Version+1 {
 		t.Fatalf("expected version %d after one winner, got %d", created.Version+1, got.Version)
+	}
+	if got.Generation != created.Generation+1 {
+		t.Fatalf("expected generation %d after one winner, got %d", created.Generation+1, got.Generation)
+	}
+}
+
+func TestLegacyRecordWithoutGeneration(t *testing.T) {
+	store := newMiniStore(t)
+	ctx := context.Background()
+	id := testIdentity(desire.TypeApply, "legacy-generation")
+	legacyStatus := desire.Status{Conditions: []metav1.Condition{{
+		Type: desire.TypeSuccessful, Status: metav1.ConditionFalse,
+		Reason: desire.ReasonKubeAPIError, Message: "old failure",
+	}}}
+	rec := resourceRecord{
+		Identity: id, Owner: testOwner, Version: 7,
+		Apply: &desire.ApplySpec{KubeContent: json.RawMessage(`{"v":1}`)}, Status: legacyStatus,
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal legacy fixture: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if unmarshalErr := json.Unmarshal(b, &obj); unmarshalErr != nil {
+		t.Fatalf("unmarshal legacy fixture: %v", unmarshalErr)
+	}
+	delete(obj, "generation")
+	b, err = json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal record without generation: %v", err)
+	}
+	if setErr := store.client.Set(ctx, redisKey(id), b, 0).Err(); setErr != nil {
+		t.Fatalf("seed legacy record: %v", setErr)
+	}
+
+	got, err := store.GetApplyDesire(ctx, id)
+	if err != nil {
+		t.Fatalf("GetApplyDesire: %v", err)
+	}
+	if got.Generation != 1 || got.Version != 7 {
+		t.Fatalf("legacy Get counters = Generation %d, Version %d; want 1, 7", got.Generation, got.Version)
+	}
+	listed, err := store.ListApplyDesires(ctx, testCluster)
+	if err != nil {
+		t.Fatalf("ListApplyDesires: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Generation != 1 {
+		t.Fatalf("legacy List result = %+v, want one desire at generation 1", listed)
+	}
+
+	updated, err := store.UpdateApplyDesireSpec(
+		ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(`{"v":2}`)}, testOwner, got.Version,
+	)
+	if err != nil {
+		t.Fatalf("UpdateApplyDesireSpec: %v", err)
+	}
+	if updated.Generation != 2 || updated.Version != 8 {
+		t.Errorf("spec update counters = Generation %d, Version %d; want 2, 8", updated.Generation, updated.Version)
+	}
+	if len(updated.Status.Conditions) != 1 || updated.Status.Conditions[0].Message != "old failure" ||
+		updated.Status.Conditions[0].ObservedGeneration != 0 {
+		t.Errorf("legacy status was not retained as stale: %+v", updated.Status.Conditions)
+	}
+	withStatus, err := store.UpdateApplyDesireStatus(ctx, id, desire.Status{Conditions: []metav1.Condition{{
+		Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+		Reason: desire.ReasonApplied, ObservedGeneration: 2,
+	}}}, updated.Version)
+	if err != nil {
+		t.Fatalf("UpdateApplyDesireStatus: %v", err)
+	}
+	if withStatus.Generation != 2 || withStatus.Version != 9 {
+		t.Errorf("status update counters = Generation %d, Version %d; want 2, 9", withStatus.Generation, withStatus.Version)
+	}
+	raw, err := store.client.Get(ctx, redisKey(id)).Bytes()
+	if err != nil {
+		t.Fatalf("get persisted record: %v", err)
+	}
+	var persisted map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted record: %v", err)
+	}
+	if string(persisted["generation"]) != "2" {
+		t.Errorf("persisted generation = %s, want 2", persisted["generation"])
 	}
 }
 

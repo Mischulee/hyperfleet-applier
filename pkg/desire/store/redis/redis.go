@@ -46,7 +46,23 @@ type resourceRecord struct {
 	TargetVersion string            `json:"targetVersion,omitempty"`
 	ReadStatus    desire.ReadStatus `json:"readStatus"`
 	Status        desire.Status     `json:"status"`
+	Generation    int64             `json:"generation"`
 	Version       int64             `json:"version"`
+}
+
+// decodeResourceRecord gives pre-generation records a baseline of 1. Their
+// Version cannot be used to reconstruct spec generation because status writes
+// also advanced it. Existing conditions with ObservedGeneration zero remain
+// stale until a controller reconciles and stamps the baseline generation.
+func decodeResourceRecord(data []byte) (*resourceRecord, error) {
+	var rec resourceRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, err
+	}
+	if rec.Generation == 0 {
+		rec.Generation = desire.InitialGeneration
+	}
+	return &rec, nil
 }
 
 // Store is a Redis-backed SpecStore and StatusStore.
@@ -93,11 +109,11 @@ func (s *Store) loadRecord(ctx context.Context, key string) (*resourceRecord, er
 		}
 		return nil, fmt.Errorf("desire: get %s: %w", key, err)
 	}
-	var rec resourceRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
+	rec, err := decodeResourceRecord(data)
+	if err != nil {
 		return nil, fmt.Errorf("desire: unmarshal %s: %w", key, err)
 	}
-	return &rec, nil
+	return rec, nil
 }
 
 // getRecordTx fetches and decodes the record at key within a transaction,
@@ -110,11 +126,11 @@ func getRecordTx(ctx context.Context, tx *redis.Tx, key string) (*resourceRecord
 	if err != nil {
 		return nil, fmt.Errorf("desire: get %s: %w", key, err)
 	}
-	var rec resourceRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
+	rec, err := decodeResourceRecord(data)
+	if err != nil {
 		return nil, fmt.Errorf("desire: unmarshal %s: %w", key, err)
 	}
-	return &rec, nil
+	return rec, nil
 }
 
 // casBaseDelay is the base jitter ceiling for CAS retry backoff.
@@ -298,22 +314,24 @@ func (s *Store) CreateApplyDesire(ctx context.Context, d desire.ApplyDesire) (de
 			}
 			// Retire the completed delete atomically with the new apply.
 			return &resourceRecord{
-				Identity: d.Identity,
-				Owner:    d.Owner,
-				OriginID: d.OriginID,
-				Version:  1,
-				Apply:    &spec,
+				Identity:   d.Identity,
+				Owner:      d.Owner,
+				OriginID:   d.OriginID,
+				Generation: desire.InitialGeneration,
+				Version:    1,
+				Apply:      &spec,
 			}, []string{redisKey(deleted.Identity)}, nil
 		}
 		if sibs[desire.TypeApply] != nil {
 			return nil, nil, desire.ErrAlreadyExists
 		}
 		return &resourceRecord{
-			Identity: d.Identity,
-			Owner:    d.Owner,
-			OriginID: d.OriginID,
-			Version:  1,
-			Apply:    &spec,
+			Identity:   d.Identity,
+			Owner:      d.Owner,
+			OriginID:   d.OriginID,
+			Generation: desire.InitialGeneration,
+			Version:    1,
+			Apply:      &spec,
 		}, nil, nil
 	})
 	if err != nil {
@@ -354,11 +372,9 @@ func (s *Store) UpdateApplyDesireSpec(
 		}
 		cloned := desire.CloneApplySpec(spec)
 		rec.Apply = &cloned
-		// Clear the status: it described the previous spec, which is no longer
-		// the desired state. Retaining a stale Successful=True would report the
-		// new, unreconciled spec as already achieved. Matches Create/Delete,
-		// which also reset the status.
-		rec.Status = desire.Status{}
+		// Retain the previous outcome; its ObservedGeneration makes clear
+		// that it does not describe the newly written spec.
+		rec.Generation++
 		rec.Version++
 		return nil
 	})
@@ -403,10 +419,11 @@ func (s *Store) CreateDeleteDesire(ctx context.Context, d desire.DeleteDesire) (
 			delKeys = append(delKeys, redisKey(apply.Identity))
 		}
 		return &resourceRecord{
-			Identity: d.Identity,
-			Owner:    d.Owner,
-			OriginID: d.OriginID,
-			Version:  1,
+			Identity:   d.Identity,
+			Owner:      d.Owner,
+			OriginID:   d.OriginID,
+			Generation: desire.InitialGeneration,
+			Version:    1,
 		}, delKeys, nil
 	})
 	if err != nil {
@@ -464,6 +481,7 @@ func (s *Store) CreateReadDesire(ctx context.Context, d desire.ReadDesire) (desi
 			Owner:         d.Owner,
 			OriginID:      d.OriginID,
 			TargetVersion: d.TargetVersion,
+			Generation:    desire.InitialGeneration,
 			Version:       1,
 		}, nil, nil
 	})
@@ -543,11 +561,11 @@ func (s *Store) loadClusterRecords(ctx context.Context, managementCluster string
 		if !ok {
 			return nil, fmt.Errorf("desire: unexpected value type for key %q: %T", keys[i], v)
 		}
-		var rec resourceRecord
-		if err := json.Unmarshal([]byte(str), &rec); err != nil {
+		rec, err := decodeResourceRecord([]byte(str))
+		if err != nil {
 			return nil, fmt.Errorf("desire: decoding record %q: %w", keys[i], err)
 		}
-		records = append(records, clusterRecord{RedisKey: keys[i], Record: &rec})
+		records = append(records, clusterRecord{RedisKey: keys[i], Record: rec})
 	}
 	return records, nil
 }
@@ -723,12 +741,13 @@ func (s *Store) projectApplyDesire(rec *resourceRecord) desire.ApplyDesire {
 		return desire.ApplyDesire{}
 	}
 	return desire.ApplyDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Spec:     desire.CloneApplySpec(*rec.Apply),
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Spec:       desire.CloneApplySpec(*rec.Apply),
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -737,11 +756,12 @@ func (s *Store) projectDeleteDesire(rec *resourceRecord) desire.DeleteDesire {
 		return desire.DeleteDesire{}
 	}
 	return desire.DeleteDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -754,6 +774,7 @@ func (s *Store) projectReadDesire(rec *resourceRecord) desire.ReadDesire {
 		Owner:         rec.Owner,
 		OriginID:      rec.OriginID,
 		TargetVersion: rec.TargetVersion,
+		Generation:    rec.Generation,
 		Version:       rec.Version,
 		Status:        desire.CloneReadStatus(rec.ReadStatus),
 	}

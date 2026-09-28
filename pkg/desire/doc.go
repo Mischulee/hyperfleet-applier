@@ -9,6 +9,12 @@
 //
 // Each desire targets one Kubernetes resource (Identity). The store also
 // supports listing and prefix delete (ListApplyDesires, DeleteByPrefix).
+// Generation starts at 1 and advances on successful Apply spec updates,
+// independently of the CAS Version, which also advances on Apply and Delete
+// status writes. The Apply controller stamps the generation it processed into
+// the Successful condition's ObservedGeneration. Consumers compare the two
+// fields on the same desire to determine whether a condition is current.
+// Delete and Read controllers do not yet stamp ObservedGeneration.
 //
 // Behavioral semantics are aligned with the ARO-HCP kube-applier specification.
 //

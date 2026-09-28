@@ -16,6 +16,10 @@ const (
 	TypeRead   DesireType = "read"
 )
 
+// InitialGeneration is assigned to every newly created desire. Redis also
+// uses it as the baseline for records written before Generation existed.
+const InitialGeneration int64 = 1
+
 var allTypes = []DesireType{TypeApply, TypeDelete, TypeRead}
 
 // AllTypes returns a copy of all desire types.
@@ -43,14 +47,15 @@ type Identity struct {
 }
 
 // Conditions follow the Kubernetes metav1.Condition convention.
-// Every desire carries one summary condition, Successful. Status=True means the
-// desired state is achieved; Status=False uses Reason to distinguish
-// in-progress work from failure.
+// After reconciliation, a desire carries one summary condition, Successful.
+// New desires have no condition until a controller records its first
+// reconciliation result. Status=True means the desired state is achieved;
+// Status=False uses Reason to distinguish in-progress work from failure.
 //
 //	Successful=True:  Applied, Deleted, Synced
 //	Successful=False: WaitingForDeletion, NotFound, KubeAPIError, PreCheckFailed
 const (
-	// TypeSuccessful is the single summary condition every desire carries.
+	// TypeSuccessful is the single summary condition for a reconciled desire.
 	TypeSuccessful = "Successful"
 
 	// Success reasons (Successful=True).
@@ -87,7 +92,12 @@ type ApplyDesire struct {
 	OriginID string    `json:"originId,omitempty"`
 	Spec     ApplySpec `json:"spec"`
 	Status   Status    `json:"status"`
-	Version  int64     `json:"version"`
+	// Generation advances on spec writes only. Compare it with a condition's
+	// ObservedGeneration to determine whether that condition describes this spec.
+	Generation int64 `json:"generation"`
+	// Version is the compare-and-swap token for spec and status writes and
+	// desire deletion.
+	Version int64 `json:"version"`
 }
 
 // ApplySpec describes the resource desired to exist.
@@ -103,7 +113,11 @@ type DeleteDesire struct {
 	// OriginID identifies the originating HyperFleet API resource.
 	OriginID string `json:"originId,omitempty"`
 	Status   Status `json:"status"`
-	Version  int64  `json:"version"`
+	// Generation identifies this desire's spec. Delete desires have no spec
+	// update operation, so it remains at its creation value.
+	Generation int64 `json:"generation"`
+	// Version is the compare-and-swap token for status writes and desire deletion.
+	Version int64 `json:"version"`
 }
 
 // ReadDesire is the intent to read a Kubernetes resource.
@@ -121,7 +135,12 @@ type ReadDesire struct {
 	// currently-preferred version.
 	TargetVersion string     `json:"targetVersion"`
 	Status        ReadStatus `json:"status"`
-	Version       int64      `json:"version"`
+	// Generation identifies this desire's spec. Read desires have no spec
+	// update operation, so it remains at its creation value.
+	Generation int64 `json:"generation"`
+	// Version is the compare-and-swap token for desire deletion; status writes
+	// do not advance it.
+	Version int64 `json:"version"`
 }
 
 // ReadStatus extends Status with KubeContent to mirror the current state

@@ -72,6 +72,20 @@ func TestEqual_DetectsReasonChange(t *testing.T) {
 	}
 }
 
+func TestEqual_DetectsObservedGenerationChange(t *testing.T) {
+	a := WithCondition(desire.Status{}, metav1.Condition{
+		Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+		Reason: desire.ReasonApplied, ObservedGeneration: 1,
+	})
+	b := WithCondition(a, metav1.Condition{
+		Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+		Reason: desire.ReasonApplied, ObservedGeneration: 2,
+	})
+	if Equal(a, b) {
+		t.Errorf("Equal(a, b) = true when ObservedGeneration differs: a=%+v b=%+v", a, b)
+	}
+}
+
 func TestEqual_DetectsLengthChange(t *testing.T) {
 	a := desire.Status{}
 	b := WithCondition(desire.Status{}, successful(desire.ReasonApplied))
