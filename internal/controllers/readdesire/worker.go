@@ -15,6 +15,12 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 )
 
+const (
+	statusWriteOutcomeSkipped   = "skipped"
+	statusWriteOutcomePerformed = "performed"
+	statusWriteOutcomeFailed    = "failed"
+)
+
 // runWorker repeatedly calls processNextWorkItem until the queue reports
 // shutdown via Get's shutdown bool.
 func (c *Controller) runWorker(ctx context.Context) {
@@ -62,7 +68,6 @@ func (c *Controller) sync(ctx context.Context, key desire.Identity) error {
 // via compute and persists it via UpdateReadDesireStatus if it changed.
 // A desire deleted since it was enqueued (ErrNotFound) is a benign no-op,
 // not an error - its informer will be torn down on the next poll tick regardless.
-//
 // This is the one place status is ever written, used both by sync (per-key,
 // workqueue-driven) and by pollOnce (per-tick, for desires whose GVR could
 // not even be resolved).
@@ -80,15 +85,36 @@ func (c *Controller) applyStatus(
 	newStatus := compute(d)
 	if readStatusEqual(newStatus, d.Status) {
 		c.skippedWrites.Add(1)
+		logStatusWrite(ctx, id, statusWriteOutcomeSkipped, nil)
 		return nil
 	}
 
 	if _, err := c.status.UpdateReadDesireStatus(ctx, id, newStatus); err != nil {
 		c.failedWrites.Add(1)
+		logStatusWrite(ctx, id, statusWriteOutcomeFailed, err)
 		return fmt.Errorf("readdesire: update read desire status %s/%s: %w", id.Namespace, id.Name, err)
 	}
 	c.performedWrites.Add(1)
+	logStatusWrite(ctx, id, statusWriteOutcomePerformed, nil)
 	return nil
+}
+
+// logStatusWrite emits a debug-level outcome for a ReadDesire status write.
+func logStatusWrite(ctx context.Context, id desire.Identity, outcome string, writeErr error) {
+	logger := slog.Default()
+	if !logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+
+	args := []any{
+		"namespace", id.Namespace,
+		"name", id.Name,
+		"outcome", outcome,
+	}
+	if writeErr != nil {
+		args = append(args, "error", writeErr)
+	}
+	logger.DebugContext(ctx, "readdesire: status write", args...)
 }
 
 // observe builds the ReadStatus to persist for key from the informer's
