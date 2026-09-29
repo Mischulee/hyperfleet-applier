@@ -270,39 +270,93 @@ func RunSpecStoreSuite(t *testing.T, newStore func(t *testing.T) desire.SpecStor
 			}
 		})
 
-		t.Run("EachAcceptedSpecWriteAdvancesGeneration", func(t *testing.T) {
+		t.Run("OnlyChangedSpecAdvancesGeneration", func(t *testing.T) {
 			store := newStore(t)
 			id := identity("cluster-a", desire.TypeApply, "generation-writes")
-			created, err := store.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, kubeContentV1))
+			const initial = `{"v":1,"meta":{"a":true,"b":[1,2]}}`
+			created, err := store.CreateApplyDesire(ctx, newApplyDesire(id, ownerA, initial))
 			if err != nil {
 				t.Fatalf("CreateApplyDesire: %v", err)
 			}
+			statusStore, ok := store.(desire.StatusStore)
+			if !ok {
+				t.Fatal("store must implement desire.StatusStore")
+			}
+			observed := condition(desire.ReasonApplied, metav1.ConditionTrue)
+			observed.ObservedGeneration = created.Generation
+			withStatus, err := statusStore.UpdateApplyDesireStatus(
+				ctx, id, desire.Status{Conditions: []metav1.Condition{observed}}, created.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireStatus: %v", err)
+			}
+			before, err := store.GetApplyDesire(ctx, id)
+			if err != nil {
+				t.Fatalf("GetApplyDesire after status update: %v", err)
+			}
 			first, err := store.UpdateApplyDesireSpec(
-				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV1)}, ownerA, created.Version,
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(initial)}, ownerA, withStatus.Version,
 			)
 			if err != nil {
 				t.Fatalf("UpdateApplyDesireSpec with identical content: %v", err)
 			}
+			const equivalent = ` { "meta": { "b": [1, 2], "a": true }, "v": 1 } `
 			second, err := store.UpdateApplyDesireSpec(
-				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV2)}, ownerA, first.Version,
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(equivalent)}, ownerA, first.Version,
 			)
 			if err != nil {
-				t.Fatalf("UpdateApplyDesireSpec with new content: %v", err)
+				t.Fatalf("UpdateApplyDesireSpec with equivalent JSON: %v", err)
 			}
-			if first.Generation != created.Generation+1 || second.Generation != first.Generation+1 {
-				t.Errorf("generations across accepted writes = %d, %d, %d; want 1, 2, 3",
-					created.Generation, first.Generation, second.Generation)
+			if first.Generation != created.Generation || second.Generation != created.Generation ||
+				first.Version != withStatus.Version+1 || second.Version != first.Version+1 ||
+				!reflect.DeepEqual(first.Status, before.Status) || !reflect.DeepEqual(second.Status, before.Status) {
+				t.Errorf("equivalent updates altered counters/status: before=%+v first=%+v second=%+v",
+					before, first, second)
+			}
+			if _, statusErr := statusStore.UpdateApplyDesireStatus(
+				ctx, id, before.Status, withStatus.Version,
+			); !errors.Is(statusErr, desire.ErrVersionConflict) {
+				t.Fatalf("stale status update after identical spec write = %v, want ErrVersionConflict", statusErr)
+			}
+			repeated, err := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(equivalent)}, ownerA, second.Version,
+			)
+			if err != nil {
+				t.Fatalf("repeated equivalent JSON update: %v", err)
+			}
+			if repeated.Generation != second.Generation || repeated.Version != second.Version+1 {
+				t.Errorf("repeated equivalent update = Generation %d Version %d, want %d and %d",
+					repeated.Generation, repeated.Version, second.Generation, second.Version+1)
+			}
+			const changed = `{"v":2,"meta":{"a":true,"b":[1,2]}}`
+			third, err := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(changed)}, ownerA, repeated.Version,
+			)
+			if err != nil {
+				t.Fatalf("UpdateApplyDesireSpec with changed content: %v", err)
+			}
+			if len(third.Status.Conditions) != 1 || third.Generation != repeated.Generation+1 ||
+				third.Version != repeated.Version+1 ||
+				!reflect.DeepEqual(third.Status, before.Status) ||
+				third.Status.Conditions[0].ObservedGeneration != created.Generation {
+				t.Errorf("changed update did not advance generation while retaining old outcome: got %+v", third)
 			}
 			if _, updateErr := store.UpdateApplyDesireSpec(
-				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(kubeContentV1)}, ownerA, first.Version,
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(changed)}, ownerA, repeated.Version,
 			); !errors.Is(updateErr, desire.ErrVersionConflict) {
 				t.Fatalf("stale spec update error = %v, want ErrVersionConflict", updateErr)
+			}
+			if _, updateErr := store.UpdateApplyDesireSpec(
+				ctx, id, desire.ApplySpec{KubeContent: json.RawMessage(changed)}, "other-owner", third.Version,
+			); !errors.Is(updateErr, desire.ErrOwnerConflict) {
+				t.Fatalf("foreign owner identical spec update error = %v, want ErrOwnerConflict", updateErr)
 			}
 			got, err := store.GetApplyDesire(ctx, id)
 			if err != nil {
 				t.Fatalf("GetApplyDesire after rejected update: %v", err)
 			}
-			if got.Generation != second.Generation || got.Version != second.Version {
+			if got.Generation != third.Generation || got.Version != third.Version ||
+				!reflect.DeepEqual(got.Status, third.Status) {
 				t.Errorf("rejected update changed counters: got Generation=%d Version=%d", got.Generation, got.Version)
 			}
 		})

@@ -16,13 +16,17 @@ Each desire type is its own record with its own `Version`, keyed by full `Identi
 therefore have up to three sibling records: apply, delete, and read.
 
 Each record also has `Generation`, initialized to 1 on creation. A successful
-`UpdateApplyDesireSpec` increments it and leaves the previous status untouched; status writes
-never change it. `Version` remains the CAS token and can advance on status writes. For Apply,
+`UpdateApplyDesireSpec` increments it only when the desired JSON content changes and leaves the
+previous status untouched; equivalent JSON with different whitespace or object key order does
+not increment it. Status writes never change it. `Version` remains the CAS token and advances on
+every accepted Apply spec update, even if the content is unchanged, and can advance on status
+writes. For Apply,
 compare the `Successful` condition's `ObservedGeneration` with the desire's `Generation` in the
 same returned record: a mismatch means the condition describes an older spec; a match means its
 status and reason describe the current attempt. New desires have no condition until a controller
 records its first reconciliation result. Delete and Read controllers do not stamp
-`ObservedGeneration` yet.
+`ObservedGeneration` yet; [HYPERFLEET-1725](https://redhat.atlassian.net/browse/HYPERFLEET-1725)
+owns that follow-up.
 
 Create-time invariants across sibling records:
 

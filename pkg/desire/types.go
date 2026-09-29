@@ -92,8 +92,9 @@ type ApplyDesire struct {
 	OriginID string    `json:"originId,omitempty"`
 	Spec     ApplySpec `json:"spec"`
 	Status   Status    `json:"status"`
-	// Generation advances on spec writes only. Compare it with a condition's
-	// ObservedGeneration to determine whether that condition describes this spec.
+	// Generation advances only when the desired spec content changes. Compare
+	// it with a condition's ObservedGeneration to determine whether that
+	// condition describes this spec.
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for spec and status writes and
 	// desire deletion.

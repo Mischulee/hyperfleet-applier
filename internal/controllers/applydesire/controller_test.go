@@ -1226,17 +1226,12 @@ func TestReconcileAll_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
 func TestReconcileAll_GenerationTransitions(t *testing.T) {
 	const targetName = "cm-generation-transition"
 	for _, tc := range []struct {
-		name        string
-		firstValid  bool
-		nextValid   bool
-		nextValue   string
-		firstStatus metav1.ConditionStatus
-		firstReason string
-		nextStatus  metav1.ConditionStatus
-		nextReason  string
+		name, nextValue, firstReason, nextReason string
+		firstStatus, nextStatus                  metav1.ConditionStatus
+		firstValid, nextValid                    bool
 	}{
 		{
-			name: "SameSuccessAtNewGeneration", firstValid: true, nextValid: true, nextValue: "v1",
+			name: "SameSuccessAtNewGeneration", firstValid: true, nextValid: true, nextValue: "v2",
 			firstStatus: metav1.ConditionTrue, firstReason: desire.ReasonApplied,
 			nextStatus: metav1.ConditionTrue, nextReason: desire.ReasonApplied,
 		},
@@ -1296,7 +1291,7 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 				t.Fatalf("status after spec update = %+v, want preserved status %+v", updated.Status, first.Status)
 			}
 
-			if err := r.reconcileAll(ctx); err != nil {
+			if err = r.reconcileAll(ctx); err != nil {
 				t.Fatalf("reconcileAll() [pass 2]: %v", err)
 			}
 			second, err := store.GetApplyDesire(ctx, id)
@@ -1310,13 +1305,61 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 			if counting.updateCalls != 2 {
 				t.Fatalf("status writes after new generation = %d, want 2", counting.updateCalls)
 			}
-			if err := r.reconcileAll(ctx); err != nil {
+			if err = r.reconcileAll(ctx); err != nil {
 				t.Fatalf("reconcileAll() [pass 3]: %v", err)
 			}
 			if counting.updateCalls != 2 {
 				t.Errorf("status writes after steady-state pass = %d, want 2", counting.updateCalls)
 			}
 		})
+	}
+}
+
+func TestReconcileAll_IdenticalSpecUpdateKeepsConditionCurrent(t *testing.T) {
+	ctx := context.Background()
+	const targetName = "cm-identical-spec"
+	dyn := newFakeDynamicClient(t, newConfigMapObject(targetName, defaultNamespace))
+	store := memory.New()
+	counting := &countingStatusStore{StatusStore: store}
+	r := New(store, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	id := applyIdentity("", "configmaps", defaultNamespace, targetName)
+	content := newConfigMapContent(t, targetName, defaultNamespace, map[string]string{"k": "v1"})
+	seedApplyDesire(t, store, id, "owner-1", content)
+
+	if err := r.reconcileAll(ctx); err != nil {
+		t.Fatalf("reconcileAll() [pass 1]: %v", err)
+	}
+	first, err := store.GetApplyDesire(ctx, id)
+	if err != nil {
+		t.Fatalf("GetApplyDesire after first pass: %v", err)
+	}
+	requireApplyCondition(t, first, metav1.ConditionTrue, desire.ReasonApplied, first.Generation)
+	if counting.updateCalls != 1 {
+		t.Fatalf("status writes after first pass = %d, want 1", counting.updateCalls)
+	}
+
+	updated, err := store.UpdateApplyDesireSpec(
+		ctx, id, desire.ApplySpec{KubeContent: content}, "owner-1", first.Version,
+	)
+	if err != nil {
+		t.Fatalf("UpdateApplyDesireSpec with identical content: %v", err)
+	}
+	if updated.Generation != first.Generation || updated.Version != first.Version+1 ||
+		!reflect.DeepEqual(updated.Status, first.Status) {
+		t.Fatalf("identical update = %+v, want unchanged generation/status and advanced Version from %+v", updated, first)
+	}
+
+	if err = r.reconcileAll(ctx); err != nil {
+		t.Fatalf("reconcileAll() [pass 2]: %v", err)
+	}
+	second, err := store.GetApplyDesire(ctx, id)
+	if err != nil {
+		t.Fatalf("GetApplyDesire after second pass: %v", err)
+	}
+	requireApplyCondition(t, second, metav1.ConditionTrue, desire.ReasonApplied, first.Generation)
+	if counting.updateCalls != 1 || second.Version != updated.Version {
+		t.Errorf("identical resubmission caused redundant status write: writes=%d Version=%d, want writes=1 Version=%d",
+			counting.updateCalls, second.Version, updated.Version)
 	}
 }
 

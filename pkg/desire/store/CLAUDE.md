@@ -12,3 +12,6 @@ Backend implementations of the `desire.SpecStore` / `desire.StatusStore` contrac
   writes also advanced it. The next write persists the normalized generation.
 - **conformance** — `RunSpecStoreSuite` and `RunStatusStoreSuite` run against both backends. Put
   shared backend behavior tests here unless the behavior is backend-specific.
+- **spec comparison** — both backends use the same JSON-value comparison when deciding whether an
+  accepted Apply spec update advances `Generation`. The CAS `Version` still advances on every
+  accepted update; JSON formatting and object key order alone do not make a new generation.

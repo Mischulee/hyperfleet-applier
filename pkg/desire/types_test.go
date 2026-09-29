@@ -88,13 +88,16 @@ func TestReadDesire_StatusJSON(t *testing.T) {
 }
 
 func TestDesireGenerationJSON(t *testing.T) {
-	for name, value := range map[string]any{
-		"Apply":  desire.ApplyDesire{Generation: 7},
-		"Delete": desire.DeleteDesire{Generation: 7},
-		"Read":   desire.ReadDesire{Generation: 7},
+	for _, tc := range []struct {
+		value any
+		name  string
+	}{
+		{value: desire.ApplyDesire{Generation: 7}, name: "Apply"},
+		{value: desire.DeleteDesire{Generation: 7}, name: "Delete"},
+		{value: desire.ReadDesire{Generation: 7}, name: "Read"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			b, err := json.Marshal(value)
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.value)
 			if err != nil {
 				t.Fatalf("Marshal: %v", err)
 			}

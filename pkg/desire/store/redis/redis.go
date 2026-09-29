@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/internal/speccompare"
 )
 
 // maxCASRetries bounds WATCH/MULTI retries when a watched key changes underfoot.
@@ -371,10 +372,12 @@ func (s *Store) UpdateApplyDesireSpec(
 			return fmt.Errorf("desire: update apply desire spec %s: %w", id, err)
 		}
 		cloned := desire.CloneApplySpec(spec)
+		if !speccompare.Equal(*rec.Apply, cloned) {
+			rec.Generation++
+		}
 		rec.Apply = &cloned
-		// Retain the previous outcome; its ObservedGeneration makes clear
-		// that it does not describe the newly written spec.
-		rec.Generation++
+		// Retain the previous outcome; its ObservedGeneration is stale only
+		// when the desired content actually changes.
 		rec.Version++
 		return nil
 	})

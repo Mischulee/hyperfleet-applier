@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/internal/speccompare"
 )
 
 // resourceRecord stores one desire keyed by full Identity.
@@ -112,7 +113,7 @@ func (s *Store) GetApplyDesire(ctx context.Context, id desire.Identity) (desire.
 	return s.projectApplyDesire(rec), nil
 }
 
-// UpdateApplyDesireSpec updates the spec and owner of an ApplyDesire.
+// UpdateApplyDesireSpec updates the spec of an ApplyDesire after checking its owner.
 func (s *Store) UpdateApplyDesireSpec(
 	ctx context.Context, id desire.Identity, spec desire.ApplySpec, owner string, version int64,
 ) (desire.ApplyDesire, error) {
@@ -138,10 +139,12 @@ func (s *Store) UpdateApplyDesireSpec(
 	}
 
 	cloned := desire.CloneApplySpec(spec)
+	if !speccompare.Equal(*rec.Apply, cloned) {
+		rec.Generation++
+	}
 	rec.Apply = &cloned
-	// Keep the previous outcome so readers can see it was observed against an
-	// earlier generation until the applier reconciles this spec.
-	rec.Generation++
+	// Keep the previous outcome; a changed spec makes its observed generation
+	// stale until the applier reconciles, while an identical spec does not.
 	rec.Version++
 	return s.projectApplyDesire(rec), nil
 }
