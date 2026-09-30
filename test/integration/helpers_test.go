@@ -194,6 +194,30 @@ func waitForApplyReason(
 	return last
 }
 
+// waitForApplyGeneration waits for a successful Apply condition describing
+// the requested spec generation, not a stale condition retained after a spec write.
+func waitForApplyGeneration(
+	t *testing.T, ctx context.Context, store desire.SpecStore, id desire.Identity, want int64,
+) desire.ApplyDesire {
+	t.Helper()
+	var last desire.ApplyDesire
+	condition := func(ctx context.Context) (bool, error) {
+		got, err := store.GetApplyDesire(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		last = got
+		cond := findCondition(got.Status, desire.TypeSuccessful)
+		return got.Generation == want && cond != nil && cond.Status == metav1.ConditionTrue &&
+			cond.Reason == desire.ReasonApplied && cond.ObservedGeneration == want, nil
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 10*time.Second, true, condition); err != nil {
+		t.Fatalf("waiting for applied generation=%d: %v (last generation: %d, last status: %+v)",
+			want, err, last.Generation, last.Status)
+	}
+	return last
+}
+
 // waitForDeleteReason is waitForApplyReason's DeleteDesire counterpart -
 // DeleteReconciler.Start is likewise a polling loop, not a single
 // caller-driven pass.

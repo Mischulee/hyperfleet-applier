@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/internal/speccompare"
 )
 
 // resourceRecord stores one desire keyed by full Identity.
@@ -19,6 +20,7 @@ type resourceRecord struct {
 	TargetVersion string
 	ReadStatus    desire.ReadStatus
 	Status        desire.Status
+	Generation    int64
 	Version       int64
 }
 
@@ -84,11 +86,12 @@ func (s *Store) CreateApplyDesire(ctx context.Context, d desire.ApplyDesire) (de
 
 	spec := desire.CloneApplySpec(d.Spec)
 	rec := &resourceRecord{
-		Identity: id,
-		Owner:    d.Owner,
-		OriginID: d.OriginID,
-		Version:  1,
-		Apply:    &spec,
+		Identity:   id,
+		Owner:      d.Owner,
+		OriginID:   d.OriginID,
+		Generation: desire.InitialGeneration,
+		Version:    1,
+		Apply:      &spec,
 	}
 	s.items[id] = rec
 	return s.projectApplyDesire(rec), nil
@@ -110,7 +113,7 @@ func (s *Store) GetApplyDesire(ctx context.Context, id desire.Identity) (desire.
 	return s.projectApplyDesire(rec), nil
 }
 
-// UpdateApplyDesireSpec updates the spec and owner of an ApplyDesire.
+// UpdateApplyDesireSpec updates the spec of an ApplyDesire after checking its owner.
 func (s *Store) UpdateApplyDesireSpec(
 	ctx context.Context, id desire.Identity, spec desire.ApplySpec, owner string, version int64,
 ) (desire.ApplyDesire, error) {
@@ -136,9 +139,12 @@ func (s *Store) UpdateApplyDesireSpec(
 	}
 
 	cloned := desire.CloneApplySpec(spec)
+	if !speccompare.Equal(*rec.Apply, cloned) {
+		rec.Generation++
+	}
 	rec.Apply = &cloned
-	// Clear status because it described the old spec.
-	rec.Status = desire.Status{}
+	// Keep the previous outcome; a changed spec makes its observed generation
+	// stale until the applier reconciles, while an identical spec does not.
 	rec.Version++
 	return s.projectApplyDesire(rec), nil
 }
@@ -190,10 +196,11 @@ func (s *Store) CreateDeleteDesire(ctx context.Context, d desire.DeleteDesire) (
 	delete(s.items, applyID)
 
 	rec := &resourceRecord{
-		Identity: id,
-		Owner:    d.Owner,
-		OriginID: d.OriginID,
-		Version:  1,
+		Identity:   id,
+		Owner:      d.Owner,
+		OriginID:   d.OriginID,
+		Generation: desire.InitialGeneration,
+		Version:    1,
 	}
 	s.items[id] = rec
 	return s.projectDeleteDesire(rec), nil
@@ -261,6 +268,7 @@ func (s *Store) CreateReadDesire(ctx context.Context, d desire.ReadDesire) (desi
 		Owner:         d.Owner,
 		OriginID:      d.OriginID,
 		TargetVersion: d.TargetVersion,
+		Generation:    desire.InitialGeneration,
 		Version:       1,
 	}
 	s.items[id] = rec
@@ -438,12 +446,13 @@ func (s *Store) projectApplyDesire(rec *resourceRecord) desire.ApplyDesire {
 		return desire.ApplyDesire{}
 	}
 	return desire.ApplyDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Spec:     desire.CloneApplySpec(*rec.Apply),
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Spec:       desire.CloneApplySpec(*rec.Apply),
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -452,11 +461,12 @@ func (s *Store) projectDeleteDesire(rec *resourceRecord) desire.DeleteDesire {
 		return desire.DeleteDesire{}
 	}
 	return desire.DeleteDesire{
-		Identity: rec.Identity,
-		Owner:    rec.Owner,
-		OriginID: rec.OriginID,
-		Version:  rec.Version,
-		Status:   desire.CloneStatus(rec.Status),
+		Identity:   rec.Identity,
+		Owner:      rec.Owner,
+		OriginID:   rec.OriginID,
+		Generation: rec.Generation,
+		Version:    rec.Version,
+		Status:     desire.CloneStatus(rec.Status),
 	}
 }
 
@@ -469,6 +479,7 @@ func (s *Store) projectReadDesire(rec *resourceRecord) desire.ReadDesire {
 		Owner:         rec.Owner,
 		OriginID:      rec.OriginID,
 		TargetVersion: rec.TargetVersion,
+		Generation:    rec.Generation,
 		Version:       rec.Version,
 		Status:        desire.CloneReadStatus(rec.ReadStatus),
 	}

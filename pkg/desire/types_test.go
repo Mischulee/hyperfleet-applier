@@ -86,3 +86,32 @@ func TestReadDesire_StatusJSON(t *testing.T) {
 		t.Fatalf("expected status.kubeContent, got keys: %v", status)
 	}
 }
+
+func TestDesireGenerationJSON(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		name  string
+	}{
+		{value: desire.ApplyDesire{Generation: 7}, name: "Apply"},
+		{value: desire.DeleteDesire{Generation: 7}, name: "Delete"},
+		{value: desire.ReadDesire{Generation: 7}, name: "Read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(b, &obj); err != nil {
+				t.Fatalf("Unmarshal JSON object: %v", err)
+			}
+			var got int64
+			if err := json.Unmarshal(obj["generation"], &got); err != nil {
+				t.Fatalf("Unmarshal generation: %v (JSON: %s)", err, b)
+			}
+			if got != 7 {
+				t.Errorf("generation = %d, want 7", got)
+			}
+		})
+	}
+}

@@ -19,9 +19,9 @@ func findCondition(status desire.Status, condType string) *metav1.Condition {
 }
 
 func TestApplied_ReplacesPriorFailedCondition(t *testing.T) {
-	failed := preCheckFailed(desire.Status{}, "previously broken")
+	failed := preCheckFailed(desire.Status{}, 1, "previously broken")
 
-	out := applied(failed)
+	out := applied(failed, 2)
 
 	if len(out.Conditions) != 1 {
 		t.Fatalf(
@@ -30,14 +30,14 @@ func TestApplied_ReplacesPriorFailedCondition(t *testing.T) {
 		)
 	}
 	c := findCondition(out, desire.TypeSuccessful)
-	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != desire.ReasonApplied {
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != desire.ReasonApplied || c.ObservedGeneration != 2 {
 		t.Errorf("applied() did not overwrite the prior condition, got %+v", c)
 	}
 }
 
 func TestApplyFailed_SetsKubeAPIErrorReason(t *testing.T) {
 	kubeErr := errors.New("apiserver unavailable")
-	out := applyFailed(desire.Status{}, kubeErr)
+	out := applyFailed(desire.Status{}, 3, kubeErr)
 
 	c := findCondition(out, desire.TypeSuccessful)
 	if c == nil {
@@ -49,10 +49,13 @@ func TestApplyFailed_SetsKubeAPIErrorReason(t *testing.T) {
 	if c.Message != kubeErr.Error() {
 		t.Errorf("applyFailed() message = %q, want %q", c.Message, kubeErr.Error())
 	}
+	if c.ObservedGeneration != 3 {
+		t.Errorf("applyFailed() observed generation = %d, want 3", c.ObservedGeneration)
+	}
 }
 
 func TestPreCheckFailed_SetsPreCheckFailedReason(t *testing.T) {
-	out := preCheckFailed(desire.Status{}, "bad manifest")
+	out := preCheckFailed(desire.Status{}, 4, "bad manifest")
 
 	c := findCondition(out, desire.TypeSuccessful)
 	if c == nil {
@@ -63,5 +66,8 @@ func TestPreCheckFailed_SetsPreCheckFailedReason(t *testing.T) {
 	}
 	if c.Message != "bad manifest" {
 		t.Errorf("preCheckFailed() message = %q, want %q", c.Message, "bad manifest")
+	}
+	if c.ObservedGeneration != 4 {
+		t.Errorf("preCheckFailed() observed generation = %d, want 4", c.ObservedGeneration)
 	}
 }

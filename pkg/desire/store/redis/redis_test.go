@@ -86,7 +86,9 @@ func TestUpdateApplyDesireSpec_ConcurrentCAS(t *testing.T) {
 	)
 	for i := range goroutines {
 		wg.Go(func() {
-			content := json.RawMessage(fmt.Sprintf(`{"v":%d}`, i))
+			// Every contender changes the initial value (1), so whichever wins
+			// must advance Generation as well as Version.
+			content := json.RawMessage(fmt.Sprintf(`{"v":%d}`, i+2))
 			_, updateErr := store.UpdateApplyDesireSpec(
 				ctx, id, desire.ApplySpec{KubeContent: content}, testOwner, created.Version,
 			)
@@ -115,6 +117,9 @@ func TestUpdateApplyDesireSpec_ConcurrentCAS(t *testing.T) {
 	}
 	if got.Version != created.Version+1 {
 		t.Fatalf("expected version %d after one winner, got %d", created.Version+1, got.Version)
+	}
+	if got.Generation != created.Generation+1 {
+		t.Fatalf("expected generation %d after one winner, got %d", created.Generation+1, got.Generation)
 	}
 }
 
@@ -366,9 +371,10 @@ func TestCASMutate_RetriesTxFailedErrThenSucceeds(t *testing.T) {
 			t.Fatal("expected missing key on first successful Watch")
 		}
 		*rec = resourceRecord{
-			Identity: testIdentity(desire.TypeRead, "cas-retry"),
-			Owner:    testOwner,
-			Version:  1,
+			Identity:   testIdentity(desire.TypeRead, "cas-retry"),
+			Owner:      testOwner,
+			Generation: desire.InitialGeneration,
+			Version:    1,
 		}
 		return nil
 	})
@@ -421,10 +427,11 @@ func TestLoadClusterRecords_GlobMetacharactersIsolated(t *testing.T) {
 			Name:              name,
 		}
 		rec := &resourceRecord{
-			Identity: id,
-			Owner:    testOwner,
-			Version:  1,
-			Apply:    &desire.ApplySpec{KubeContent: json.RawMessage(`{}`)},
+			Identity:   id,
+			Owner:      testOwner,
+			Generation: desire.InitialGeneration,
+			Version:    1,
+			Apply:      &desire.ApplySpec{KubeContent: json.RawMessage(`{}`)},
 		}
 		b, err := json.Marshal(rec)
 		if err != nil {

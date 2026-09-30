@@ -78,7 +78,12 @@ type SpecStore interface {
 	// Returns ErrNotFound if the desire doesn't exist.
 	GetApplyDesire(ctx context.Context, id Identity) (ApplyDesire, error)
 
-	// UpdateApplyDesireSpec updates the Spec and Owner of an ApplyDesire.
+	// UpdateApplyDesireSpec updates the Spec of an ApplyDesire and preserves
+	// existing Status. Generation advances only when the desired JSON value
+	// changes; equivalent JSON (ignoring whitespace and object key order) keeps
+	// the same Generation. Every accepted update advances the CAS Version.
+	// The owner argument is checked against the record's Owner; it does not
+	// change ownership.
 	// Requires exact Version match; returns ErrVersionConflict if stale.
 	// Returns ErrOwnerConflict if called by a different owner.
 	UpdateApplyDesireSpec(
@@ -136,7 +141,8 @@ type StatusStore interface {
 	// Returns ErrNotFound if the desire doesn't exist.
 	GetApplyDesire(ctx context.Context, id Identity) (ApplyDesire, error)
 
-	// UpdateApplyDesireStatus updates only the Status field of an ApplyDesire.
+	// UpdateApplyDesireStatus updates only Status (and the CAS Version), leaving
+	// Spec and Generation unchanged.
 	// Requires exact Version match; returns ErrVersionConflict if stale.
 	// Does not check ownership.
 	UpdateApplyDesireStatus(ctx context.Context, id Identity, status Status, version int64) (ApplyDesire, error)

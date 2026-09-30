@@ -343,7 +343,7 @@ func TestSync_MeaningfulObjectChangeWritesStatus(t *testing.T) {
 // TestSync_UpdateFailureIsPropagatedForRetry proves that any
 // UpdateReadDesireStatus failure is returned by sync (not swallowed), so
 // processNextWorkItem's AddRateLimited retries it promptly. Read status
-// writes are decoupled from the shared per-resource Version (no CAS, never
+// writes do not check the ReadDesire Version (no CAS, never
 // ErrVersionConflict - see statusStore), so this covers a generic backend
 // failure rather than a version race specifically.
 func TestSync_UpdateFailureIsPropagatedForRetry(t *testing.T) {

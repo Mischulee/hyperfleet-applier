@@ -63,7 +63,11 @@ func TestEnvtest_ApplyReadDeleteLifecycle(t *testing.T) {
 	go func() { _ = readC.Start(ctx) }()
 
 	// 1. applydesire creates the resource for real via SSA.
-	waitForApplyReason(t, ctx, store, applyID, desire.ReasonApplied)
+	firstApply := waitForApplyReason(t, ctx, store, applyID, desire.ReasonApplied)
+	if c := findCondition(firstApply.Status, desire.TypeSuccessful); c == nil ||
+		c.ObservedGeneration != firstApply.Generation {
+		t.Errorf("first Apply condition = %+v, want observed generation %d", c, firstApply.Generation)
+	}
 
 	// 2. readdesire, running independently, observes it.
 	got := waitForReadReason(t, ctx, store, readID, desire.ReasonSynced)
@@ -71,21 +75,24 @@ func TestEnvtest_ApplyReadDeleteLifecycle(t *testing.T) {
 		t.Errorf("KubeContent = %s, want it to contain %s", got.Status.KubeContent, want)
 	}
 
-	// Version is re-read here rather than
-	// reused from the initial create: it's shared across the apply/delete/
-	// read sub-states for this target, so applyR's own status write for
-	// step 1 already bumped it.
+	// Version is re-read here rather than reused from the initial create:
+	// applyR's status write for step 1 already bumped the ApplyDesire's CAS token.
 	current, err := store.GetApplyDesire(ctx, applyID)
 	if err != nil {
 		t.Fatalf("GetApplyDesire before update: %v", err)
 	}
 	updatedContent := newConfigMapContent(t, name, defaultNamespace, map[string]string{"k": "v2"})
-	if _, err := store.UpdateApplyDesireSpec(
+	updatedApply, err := store.UpdateApplyDesireSpec(
 		ctx, applyID, desire.ApplySpec{KubeContent: updatedContent}, testOwner, current.Version,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("UpdateApplyDesireSpec: %v", err)
 	}
+	if updatedApply.Generation != current.Generation+1 {
+		t.Errorf("updated Apply generation = %d, want %d", updatedApply.Generation, current.Generation+1)
+	}
 	waitForReasonAndContent(t, ctx, store, readID, `"k":"v2"`)
+	waitForApplyGeneration(t, ctx, store, applyID, updatedApply.Generation)
 
 	// 4. Creating the DeleteDesire must supersede (clear) the ApplyDesire.
 	if _, err := store.CreateDeleteDesire(ctx, desire.DeleteDesire{Identity: deleteID, Owner: testOwner}); err != nil {

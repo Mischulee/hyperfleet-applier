@@ -176,12 +176,12 @@ func (r *ApplyReconciler) reconcileOne(ctx context.Context, d desire.ApplyDesire
 func (r *ApplyReconciler) applyToCluster(ctx context.Context, d desire.ApplyDesire) (desire.Status, error) {
 	obj := &unstructured.Unstructured{}
 	if err := json.Unmarshal(d.Spec.KubeContent, obj); err != nil {
-		return preCheckFailed(d.Status, fmt.Sprintf(
+		return preCheckFailed(d.Status, d.Generation, fmt.Sprintf(
 			"apply: manifest could not be decoded as a Kubernetes object (invalid JSON or missing kind): %v", err,
 		)), nil
 	}
 	if obj.GetAPIVersion() == "" || obj.GetKind() == "" || obj.GetName() == "" {
-		return preCheckFailed(d.Status, "apply: manifest is missing apiVersion, kind, or metadata.name"), nil
+		return preCheckFailed(d.Status, d.Generation, "apply: manifest is missing apiVersion, kind, or metadata.name"), nil
 	}
 
 	gvk := obj.GroupVersionKind()
@@ -196,10 +196,10 @@ func (r *ApplyReconciler) applyToCluster(ctx context.Context, d desire.ApplyDesi
 		mapping, err = r.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	}
 	if err != nil {
-		return preCheckFailed(d.Status, fmt.Sprintf("apply: no resource mapping for %s: %v", gvk, err)), nil
+		return preCheckFailed(d.Status, d.Generation, fmt.Sprintf("apply: no resource mapping for %s: %v", gvk, err)), nil
 	}
 	if err := checkApplyTarget(d.Identity, obj, mapping); err != nil {
-		return preCheckFailed(d.Status, err.Error()), nil
+		return preCheckFailed(d.Status, d.Generation, err.Error()), nil
 	}
 
 	ri := r.dyn.Resource(mapping.Resource)
@@ -232,9 +232,9 @@ func (r *ApplyReconciler) applyToCluster(ctx context.Context, d desire.ApplyDesi
 			// Abort instead of recording shutdown as KubeAPIError.
 			return desire.Status{}, fmt.Errorf("apply %s: %w", util.DescribeIdentity(d.Identity), ctxErr)
 		}
-		return applyFailed(d.Status, err), nil
+		return applyFailed(d.Status, d.Generation, err), nil
 	}
-	return applied(d.Status), nil
+	return applied(d.Status, d.Generation), nil
 }
 
 // checkApplyTarget rejects manifests that target a different object than id.
