@@ -16,8 +16,7 @@ const (
 	TypeRead   DesireType = "read"
 )
 
-// InitialGeneration is assigned to every newly created desire. Redis also
-// uses it as the baseline for records written before Generation existed.
+// InitialGeneration is assigned by the store to every newly created desire.
 const InitialGeneration int64 = 1
 
 var allTypes = []DesireType{TypeApply, TypeDelete, TypeRead}
@@ -47,15 +46,14 @@ type Identity struct {
 }
 
 // Conditions follow the Kubernetes metav1.Condition convention.
-// After reconciliation, a desire carries one summary condition, Successful.
-// New desires have no condition until a controller records its first
-// reconciliation result. Status=True means the desired state is achieved;
-// Status=False uses Reason to distinguish in-progress work from failure.
+// Successful summarizes a reconciliation outcome through Status and Reason.
+// Consult the desire's status for the reported outcome; a missing condition
+// supplies no outcome. See the package documentation for condition freshness.
 //
 //	Successful=True:  Applied, Deleted, Synced
 //	Successful=False: WaitingForDeletion, NotFound, KubeAPIError, PreCheckFailed
 const (
-	// TypeSuccessful is the single summary condition for a reconciled desire.
+	// TypeSuccessful names the summary reconciliation condition.
 	TypeSuccessful = "Successful"
 
 	// Success reasons (Successful=True).
@@ -92,9 +90,10 @@ type ApplyDesire struct {
 	OriginID string    `json:"originId,omitempty"`
 	Spec     ApplySpec `json:"spec"`
 	Status   Status    `json:"status"`
-	// Generation advances only when the desired spec content changes. Compare
-	// it with a condition's ObservedGeneration to determine whether that
-	// condition describes this spec.
+	// Generation is the store-owned revision of this desire's spec. It advances
+	// only when the desired spec content changes. Compare it with the Apply
+	// condition's ObservedGeneration, not the HyperFleet API generation or the
+	// target Kubernetes object's metadata.generation (see package documentation).
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for spec and status writes and
 	// desire deletion.
@@ -114,8 +113,9 @@ type DeleteDesire struct {
 	// OriginID identifies the originating HyperFleet API resource.
 	OriginID string `json:"originId,omitempty"`
 	Status   Status `json:"status"`
-	// Generation identifies this desire's spec. Delete desires have no spec
-	// update operation, so it remains at its creation value.
+	// Generation is set by the store to InitialGeneration at creation. Delete
+	// desires have no spec-update operation. Condition generation stamping is
+	// tracked by HYPERFLEET-1725 (see package documentation).
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for status writes and desire deletion.
 	Version int64 `json:"version"`
@@ -136,8 +136,9 @@ type ReadDesire struct {
 	// currently-preferred version.
 	TargetVersion string     `json:"targetVersion"`
 	Status        ReadStatus `json:"status"`
-	// Generation identifies this desire's spec. Read desires have no spec
-	// update operation, so it remains at its creation value.
+	// Generation is set by the store to InitialGeneration at creation. Read
+	// desires have no spec-update operation. Condition generation stamping is
+	// tracked by HYPERFLEET-1725 (see package documentation).
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for desire deletion; status writes
 	// do not advance it.

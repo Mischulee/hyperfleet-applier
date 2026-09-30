@@ -51,21 +51,6 @@ type resourceRecord struct {
 	Version       int64             `json:"version"`
 }
 
-// decodeResourceRecord gives pre-generation records a baseline of 1. Their
-// Version cannot be used to reconstruct spec generation because status writes
-// also advanced it. Existing conditions with ObservedGeneration zero remain
-// stale until a controller reconciles and stamps the baseline generation.
-func decodeResourceRecord(data []byte) (*resourceRecord, error) {
-	var rec resourceRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
-	}
-	if rec.Generation == 0 {
-		rec.Generation = desire.InitialGeneration
-	}
-	return &rec, nil
-}
-
 // Store is a Redis-backed SpecStore and StatusStore.
 // Mutations use WATCH/MULTI/EXEC for versioned compare-and-swap.
 type Store struct {
@@ -110,11 +95,11 @@ func (s *Store) loadRecord(ctx context.Context, key string) (*resourceRecord, er
 		}
 		return nil, fmt.Errorf("desire: get %s: %w", key, err)
 	}
-	rec, err := decodeResourceRecord(data)
-	if err != nil {
+	var rec resourceRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, fmt.Errorf("desire: unmarshal %s: %w", key, err)
 	}
-	return rec, nil
+	return &rec, nil
 }
 
 // getRecordTx fetches and decodes the record at key within a transaction,
@@ -127,11 +112,11 @@ func getRecordTx(ctx context.Context, tx *redis.Tx, key string) (*resourceRecord
 	if err != nil {
 		return nil, fmt.Errorf("desire: get %s: %w", key, err)
 	}
-	rec, err := decodeResourceRecord(data)
-	if err != nil {
+	var rec resourceRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, fmt.Errorf("desire: unmarshal %s: %w", key, err)
 	}
-	return rec, nil
+	return &rec, nil
 }
 
 // casBaseDelay is the base jitter ceiling for CAS retry backoff.
@@ -564,11 +549,11 @@ func (s *Store) loadClusterRecords(ctx context.Context, managementCluster string
 		if !ok {
 			return nil, fmt.Errorf("desire: unexpected value type for key %q: %T", keys[i], v)
 		}
-		rec, err := decodeResourceRecord([]byte(str))
-		if err != nil {
+		var rec resourceRecord
+		if err := json.Unmarshal([]byte(str), &rec); err != nil {
 			return nil, fmt.Errorf("desire: decoding record %q: %w", keys[i], err)
 		}
-		records = append(records, clusterRecord{RedisKey: keys[i], Record: rec})
+		records = append(records, clusterRecord{RedisKey: keys[i], Record: &rec})
 	}
 	return records, nil
 }

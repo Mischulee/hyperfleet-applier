@@ -72,17 +72,34 @@ func TestEqual_DetectsReasonChange(t *testing.T) {
 	}
 }
 
-func TestEqual_DetectsObservedGenerationChange(t *testing.T) {
-	a := WithCondition(desire.Status{}, metav1.Condition{
-		Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
-		Reason: desire.ReasonApplied, ObservedGeneration: 1,
-	})
-	b := WithCondition(a, metav1.Condition{
-		Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
-		Reason: desire.ReasonApplied, ObservedGeneration: 2,
-	})
-	if Equal(a, b) {
-		t.Errorf("Equal(a, b) = true when ObservedGeneration differs: a=%+v b=%+v", a, b)
+func TestEqual_ObservedGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation int64
+		wantEqual  bool
+	}{
+		{name: "MatchingGeneration", generation: 2, wantEqual: true},
+		{name: "OlderGeneration", generation: 1, wantEqual: false},
+		{name: "NewerGeneration", generation: 3, wantEqual: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := WithCondition(desire.Status{}, metav1.Condition{
+				Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+				Reason: desire.ReasonApplied, ObservedGeneration: 2,
+				LastTransitionTime: metav1.NewTime(time.Unix(100, 0)),
+			})
+			b := WithCondition(a, metav1.Condition{
+				Type: desire.TypeSuccessful, Status: metav1.ConditionTrue,
+				Reason: desire.ReasonApplied, ObservedGeneration: tc.generation,
+			})
+			b.Conditions[0].LastTransitionTime = metav1.NewTime(time.Unix(200, 0))
+			if got := Equal(a, b); got != tc.wantEqual {
+				t.Errorf("Equal(a, b) = %t, want %t: a=%+v b=%+v", got, tc.wantEqual, a, b)
+			}
+			if got := Equal(b, a); got != tc.wantEqual {
+				t.Errorf("Equal(b, a) = %t, want %t: a=%+v b=%+v", got, tc.wantEqual, a, b)
+			}
+		})
 	}
 }
 
