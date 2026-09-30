@@ -6,6 +6,7 @@ RELEASE_NAME="${RELEASE_NAME:-test-release}"
 
 HELM="${HELM:-helm}"
 KUBECONFORM="${KUBECONFORM:-kubeconform}"
+YQ="${YQ:-yq}"
 
 KUBECONFORM_FLAGS=(
   -strict
@@ -17,9 +18,9 @@ DEFAULT_SETS=(
   --set image.registry=quay.io
   --set image.repository=openshift-hyperfleet/hyperfleet-applier
   --set image.tag=test
-  --set applier.managementCluster=test-cluster
-  --set applier.pollInterval=5s
-  --set redis.url=redis://redis:6379/0
+  --set config.managementCluster=test-cluster
+  --set config.pollInterval=5s
+  --set config.redis.url=redis://redis:6379/0
 )
 
 PASSED=0
@@ -101,9 +102,11 @@ echo "Linting Helm chart..."
 
 # ─── Positive rendering tests ─────────────────────────────────────────
 
+## Template show rbac.yaml
 run_test "template with explicit RBAC allowlist"
 
 OUTPUT=$(render \
+  -s templates/rbac.yaml \
   --set-json 'rbac.allowlist=[{"apiGroups":[""],"resources":["configmaps"]},{"apiGroups":["apps"],"resources":["deployments"]}]')
 
 assert_contains "$OUTPUT" 'kind: ClusterRole' \
@@ -115,12 +118,13 @@ assert_contains "$OUTPUT" 'apps' \
 assert_contains "$OUTPUT" 'deployments' \
   "allowlisted deployments resource not found in rendered output"
 
+
 echo "$OUTPUT" | kubeconform_validate
 pass "Explicit RBAC allowlist template"
 
 run_test "template with devModeWildcard"
 
-OUTPUT=$(render --set rbac.devModeWildcard=true)
+OUTPUT=$(render --set rbac.devModeWildcard=true -s templates/rbac.yaml)
 
 assert_contains "$OUTPUT" 'kind: ClusterRole' \
   "ClusterRole not found in rendered output"
@@ -137,85 +141,65 @@ pass "devModeWildcard template"
 
 # ─── Container spec tests ────────────────────────────────────────────
 
+## Template show deployment.yaml
 run_test "container args include serve subcommand"
 
-OUTPUT=$(render --set rbac.devModeWildcard=true)
+OUTPUT=$(render --set rbac.devModeWildcard=true -s templates/deployment.yaml)
 
-assert_contains "$OUTPUT" 'args:' \
-  "args field not found in rendered deployment"
-assert_contains "$OUTPUT" 'serve' \
+assert_contains "$OUTPUT" 'args: ["serve", "--config", "/etc/hyperfleet/config.yaml"]' \
   "serve subcommand not found in container args"
 
 pass "Container args include serve subcommand"
 
-# ─── ConfigMap tests ──────────────────────────────────────────────────
-
-run_test "ConfigMap renders config.yaml from values"
-
-OUTPUT=$(render --set rbac.devModeWildcard=true)
-
-assert_contains "$OUTPUT" 'kind: ConfigMap' \
-  "ConfigMap not found in rendered output"
-assert_contains "$OUTPUT" 'management_cluster: "test-cluster"' \
-  "management_cluster not found in ConfigMap"
-assert_contains "$OUTPUT" 'poll_interval: "5s"' \
-  "poll_interval not found in ConfigMap"
-assert_contains "$OUTPUT" 'url: "redis://redis:6379/0"' \
-  "redis url not found in ConfigMap"
-assert_contains "$OUTPUT" 'discovery_refresh_interval:' \
-  "discovery_refresh_interval not found in ConfigMap"
-
-pass "ConfigMap renders config.yaml from values"
-
 run_test "Deployment mounts ConfigMap at /etc/hyperfleet"
-
-OUTPUT=$(render --set rbac.devModeWildcard=true)
-
 assert_contains "$OUTPUT" 'mountPath: /etc/hyperfleet' \
   "ConfigMap volume mount not found in deployment"
 assert_contains "$OUTPUT" 'readOnly: true' \
   "ConfigMap mount should be read-only"
-
 pass "Deployment mounts ConfigMap"
 
-run_test "configOverride replaces template-generated config"
+# ─── ConfigMap tests ─────────────────────────────────────────────────
 
-OVERRIDE_CONTENT="management_cluster: override-cluster
+TMPFILES=()
+cleanup() { rm -f "${TMPFILES[@]}"; }
+trap cleanup EXIT
+
+OVERRIDE_FILE=$(mktemp -t override-XXXXXX).yaml
+TMPFILES+=("$OVERRIDE_FILE")
+cat > "$OVERRIDE_FILE" <<'YAML'
+management_cluster: override-cluster
 poll_interval: 10s
+discovery_refresh_interval: 5m
 log:
   level: debug
   format: json
   output: stdout
 clients:
   redis:
-    url: redis://custom:6379/0"
+    url: redis://custom:6379/0
+YAML
 
-OUTPUT=$(render \
-  --set rbac.devModeWildcard=true \
-  --set "applier.configOverride=$OVERRIDE_CONTENT")
+# ─── ConfigMap validation tests on config.yaml ─────────────────────────────────────────
 
-assert_contains "$OUTPUT" 'override-cluster' \
-  "configOverride content not found in rendered ConfigMap"
-assert_not_contains "$OUTPUT" 'management_cluster: "test-cluster"' \
-  "template-generated management_cluster should not appear when configOverride is set"
+## Template show configmap.yaml
+run_test "rendered config.yaml passes Go validation"
 
-pass "configOverride replaces template-generated config"
+CONFIG_YAML=$(render --set rbac.devModeWildcard=true -s templates/configmap.yaml | $YQ '.data["config.yaml"]')
 
-run_test "configOverride skips value validation"
+TMPCONFIG=$(mktemp -t helm-config-XXXXXX).yaml
+TMPFILES+=("$TMPCONFIG")
+echo "$CONFIG_YAML" > "$TMPCONFIG"
 
-if OUTPUT=$(render \
-  --set rbac.devModeWildcard=true \
-  --set applier.managementCluster="" \
-  --set applier.pollInterval="" \
-  --set redis.url="" \
-  --set "applier.configOverride=management_cluster: from-file" 2>&1); then
-  assert_contains "$OUTPUT" 'from-file' \
-    "configOverride content not found when individual values are empty"
-else
-  fail "configOverride should bypass validation of individual values"
+if ! go run ./cmd config-dump --config "$TMPCONFIG" > /dev/null 2>&1; then
+  fail "rendered config.yaml failed Go validation: $(go run ./cmd config-dump --config "$TMPCONFIG" 2>&1)"
 fi
 
-pass "configOverride skips value validation"
+if ! go run ./cmd config-dump --config "$OVERRIDE_FILE" > /dev/null 2>&1; then
+  fail "rendered config.yaml failed Go validation: $(go run ./cmd config-dump --config "$TMPCONFIG" 2>&1)"
+fi
+
+pass "Rendered config.yaml passes Go validation"
+
 
 # ─── Validation failure tests ─────────────────────────────────────────
 

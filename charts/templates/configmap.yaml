@@ -1,3 +1,4 @@
+{{- include "hyperfleet-applier.validateConfigMap" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,19 +7,21 @@ metadata:
     {{- include "hyperfleet-applier.labels" . | nindent 4 }}
 data:
   config.yaml: |
-{{- if .Values.applier.configOverride }}
-{{ .Values.applier.configOverride | indent 4 }}
+{{- if .Values.configOverride }}
+{{ .Values.configOverride | indent 4 }}
 {{- else }}
-    management_cluster: {{ .Values.applier.managementCluster | quote }}
-    poll_interval: {{ .Values.applier.pollInterval | quote }}
-    discovery_refresh_interval: {{ .Values.applier.discoveryRefreshInterval | default "30s" | quote }}
+    {{- with .Values.config }}
+    management_cluster: {{ .managementCluster | quote }}
+    poll_interval: {{ .pollInterval | quote }}
+    discovery_refresh_interval: {{ .discoveryRefreshInterval | quote }}
     log:
-      level: {{ .Values.log.level | default "info" | quote }}
-      format: {{ .Values.log.format | default "json" | quote }}
-      output: {{ .Values.log.output | default "stdout" | quote }}
+      level: {{  .log.level | quote }}
+      format: {{ .log.format | quote }}
+      output: {{ .log.output | quote }}
     clients:
       redis:
-        url: {{ .Values.redis.url | quote }}
+        url: {{ .redis.url | quote }}
       kubernetes:
-        kube_config_path: ""
+        kube_config_path: {{ .kubeConfigPath | quote }}
+      {{- end }}
 {{- end }}
