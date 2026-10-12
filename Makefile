@@ -17,6 +17,9 @@ LDFLAGS := -s -w \
 	-X main.commit=$(GIT_SHA) \
 	-X main.date=$(BUILD_DATE)
 
+CGO_ENABLED ?= 1
+GOEXPERIMENT ?= boringcrypto
+GOFIPS140 ?= off
 
 CONFIG ?= configs/applier.yaml
 KUBE_CONFIG_PATH ?= $(if $(KUBECONFIG),$(KUBECONFIG),$(HOME)/.kube/config)
@@ -49,8 +52,8 @@ help: ## Display this help
 CGO_ENABLED ?= 1
 
 .PHONY: build
-build: ## Build the applier binary	
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_PATH) ./cmd
+build: ## Build the applier binary
+	CGO_ENABLED=$(CGO_ENABLED) GOEXPERIMENT=$(GOEXPERIMENT) GOFIPS140=$(GOFIPS140) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_PATH) ./cmd
 
 .PHONY: run
 run: build ## Run the applier service
@@ -138,7 +141,7 @@ IMAGE_TAG ?= $(APP_VERSION)
 IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 PLATFORM ?= linux/amd64
 
-BASE_IMAGE ?= registry.access.redhat.com/ubi9-micro:latest
+BASE_IMAGE ?= registry.access.redhat.com/ubi9/ubi-minimal:latest
 # Auto-detect container tool (podman preferred when available)
 CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 
