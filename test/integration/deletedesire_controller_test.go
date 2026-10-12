@@ -17,12 +17,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/deletedesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/memory"
 )
 
 // deletePollInterval is short enough that these tests don't spend most of
-// their budget waiting on DeleteReconciler.Start's own ticker.
+// their budget waiting on serial.Runnable's ticker.
 const deletePollInterval = 50 * time.Millisecond
 
 // deleteWidgetGVR is TestEnvtest_DeleteDesire_NewCRDResolvedAutomatically's
@@ -112,10 +113,10 @@ func TestEnvtest_DeleteDesire_SimpleCases(t *testing.T) {
 				t.Fatalf("CreateDeleteDesire: %v", err)
 			}
 
-			r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, deletePollInterval)
+			r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
-			go func() { _ = r.Start(ctx) }()
+			go func() { _ = serial.New(deletePollInterval, r).Start(ctx) }()
 
 			updated := waitForDeleteReason(t, ctx, store, id, desire.ReasonDeleted)
 			if len(updated.Status.Conditions) != 1 {
@@ -161,7 +162,7 @@ func TestEnvtest_DeleteDesire_WaitsForFinalizers(t *testing.T) {
 	t.Cleanup(func() { removeFinalizer(t, pod.Namespace, pod.Name, podFinalizer) })
 
 	store := memory.New()
-	r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, deletePollInterval)
+	r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
 
 	id := identity(desire.TypeDelete, "", "pods", "test-ns-finalizers", "test-pod-finalizer")
 	if _, err := store.CreateDeleteDesire(context.Background(), desire.DeleteDesire{Identity: id, Owner: testOwner}); err != nil {
@@ -170,7 +171,7 @@ func TestEnvtest_DeleteDesire_WaitsForFinalizers(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = r.Start(ctx) }()
+	go func() { _ = serial.New(deletePollInterval, r).Start(ctx) }()
 
 	updated := waitForDeleteReason(t, ctx, store, id, desire.ReasonWaitingForDeletion)
 	if len(updated.Status.Conditions) != 1 {
@@ -213,14 +214,14 @@ func TestEnvtest_DeleteDesire_NewCRDResolvedAutomatically(t *testing.T) {
 	t.Cleanup(cancel)
 
 	store := memory.New()
-	r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, deletePollInterval)
+	r := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
 
 	id := widgetIdentity(desire.TypeDelete, deleteWidgetGVR, defaultNamespace, name)
 	if _, err := store.CreateDeleteDesire(ctx, desire.DeleteDesire{Identity: id, Owner: testOwner}); err != nil {
 		t.Fatalf("CreateDeleteDesire: %v", err)
 	}
 
-	go func() { _ = r.Start(ctx) }()
+	go func() { _ = serial.New(deletePollInterval, r).Start(ctx) }()
 
 	// 1. The Widget CRD doesn't exist yet: GVR resolution fails even after
 	// setupResourceClient's own internal Reset()-and-retry.
@@ -251,14 +252,14 @@ func TestEnvtest_DeleteDesire_RBACDeniedGetGetsKubeAPIError(t *testing.T) {
 	restricted := restrictedRBACClient(t)
 
 	store := memory.New()
-	r := deletedesire.New(store, store, restricted, envRESTMapper, testManagementCluster, deletePollInterval)
+	r := deletedesire.New(store, store, restricted, envRESTMapper, testManagementCluster)
 
 	id := podIdentity(desire.TypeDelete, name)
 	if _, err := store.CreateDeleteDesire(ctx, desire.DeleteDesire{Identity: id, Owner: testOwner}); err != nil {
 		t.Fatalf("CreateDeleteDesire: %v", err)
 	}
 
-	t.Cleanup(startController(t, ctx, cancel, r.Start))
+	t.Cleanup(startController(t, ctx, cancel, serial.New(deletePollInterval, r).Start))
 
 	dd := waitForDeleteReason(t, ctx, store, id, desire.ReasonKubeAPIError)
 	assertConditionMessageContains(t, dd.Status, desire.TypeSuccessful, "forbidden")

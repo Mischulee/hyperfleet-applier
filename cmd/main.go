@@ -26,6 +26,7 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/applydesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/deletedesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/readdesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/discovery"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/reconciler"
 	desireredis "github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/redis"
@@ -198,8 +199,11 @@ func runServe(parent context.Context, cfg *config.Config) error {
 
 	runnables := []reconciler.Runnable{
 		discovery.New(mapper, cfg.DiscoveryRefreshInterval),
-		applydesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
-		deletedesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
+		serial.New(
+			pollInterval,
+			applydesire.New(store, store, dyn, mapper, cfg.ManagementCluster),
+			deletedesire.New(store, store, dyn, mapper, cfg.ManagementCluster),
+		),
 		readdesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
 	}
 

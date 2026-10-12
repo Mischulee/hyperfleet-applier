@@ -16,12 +16,13 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/applydesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/memory"
 )
 
 // applyPollInterval is short enough that these tests don't spend most of
-// their budget waiting on ApplyReconciler.Start's own ticker.
+// their budget waiting on serial.Runnable's ticker.
 const applyPollInterval = 50 * time.Millisecond
 
 // applyWidgetGVR is TestEnvtest_ApplyDesire_NewCRDResolvedAutomatically's own
@@ -59,8 +60,8 @@ func TestEnvtest_ApplyDesire_RepeatedApplyIsNoOp(t *testing.T) {
 	store := memory.New()
 	const name = "cm-envtest-noop"
 
-	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, applyPollInterval)
-	go func() { _ = r.Start(ctx) }()
+	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	go func() { _ = serial.New(applyPollInterval, r).Start(ctx) }()
 
 	id := configMapIdentity(desire.TypeApply, name)
 	content := newConfigMapContent(t, name, defaultNamespace, map[string]string{"k": "v"})
@@ -129,8 +130,8 @@ func TestEnvtest_ApplyDesire_ForceReclaimsContestedField(t *testing.T) {
 	})
 
 	store := memory.New()
-	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, applyPollInterval)
-	go func() { _ = r.Start(ctx) }()
+	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	go func() { _ = serial.New(applyPollInterval, r).Start(ctx) }()
 
 	content, err := json.Marshal(map[string]interface{}{
 		"apiVersion": "v1",
@@ -174,8 +175,8 @@ func TestEnvtest_ApplyDesire_ClusterScopedResourceWithManifestNamespace(t *testi
 	const name = "cr-envtest-stray-ns"
 
 	store := memory.New()
-	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, applyPollInterval)
-	go func() { _ = r.Start(ctx) }()
+	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	go func() { _ = serial.New(applyPollInterval, r).Start(ctx) }()
 
 	id := clusterRoleIdentity(desire.TypeApply, name)
 	content := newClusterRoleContentWithNamespace(t, name, "stray-namespace")
@@ -203,8 +204,8 @@ func TestEnvtest_ApplyDesire_InvalidManifestGetsKubeAPIErrorStatus(t *testing.T)
 	const name = "pod-envtest-invalid"
 
 	store := memory.New()
-	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, applyPollInterval)
-	go func() { _ = r.Start(ctx) }()
+	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	go func() { _ = serial.New(applyPollInterval, r).Start(ctx) }()
 
 	content, err := json.Marshal(map[string]interface{}{
 		"apiVersion": "v1",
@@ -240,8 +241,8 @@ func TestEnvtest_ApplyDesire_NewCRDResolvedAutomatically(t *testing.T) {
 	const name = "widget-envtest-apply"
 
 	store := memory.New()
-	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, applyPollInterval)
-	go func() { _ = r.Start(ctx) }()
+	r := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	go func() { _ = serial.New(applyPollInterval, r).Start(ctx) }()
 
 	content, err := json.Marshal(map[string]interface{}{
 		"apiVersion": applyWidgetGVR.Group + "/" + applyWidgetGVR.Version,
@@ -277,8 +278,8 @@ func TestEnvtest_ApplyDesire_RBACDeniedApplyGetsKubeAPIError(t *testing.T) {
 	restricted := restrictedRBACClient(t)
 
 	store := memory.New()
-	r := applydesire.New(store, store, restricted, envRESTMapper, testManagementCluster, applyPollInterval)
-	t.Cleanup(startController(t, ctx, cancel, r.Start))
+	r := applydesire.New(store, store, restricted, envRESTMapper, testManagementCluster)
+	t.Cleanup(startController(t, ctx, cancel, serial.New(applyPollInterval, r).Start))
 
 	id := podIdentity(desire.TypeApply, name)
 	seedApplyDesire(t, store, id, newPodContent(t, name, defaultNamespace))

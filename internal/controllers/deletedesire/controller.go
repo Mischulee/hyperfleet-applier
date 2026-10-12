@@ -1,8 +1,8 @@
 // Package deletedesire reconciles DeleteDesires against the local kube-apiserver.
 //
-// A DeleteReconciler is bound to one management-cluster partition. Each reconcileAll pass
+// A DeleteReconciler is bound to one management-cluster partition. Each RunOnce pass
 // lists DeleteDesires from the spec store and reconciles each by deleting the resource
-// and confirming its absence past finalizers.
+// and confirming its absence past finalizers. The caller owns the poll loop.
 package deletedesire
 
 import (
@@ -26,7 +26,7 @@ import (
 
 const (
 	// deleteTimeout bounds a single Delete call so a hung apiserver
-	// cannot stall an entire reconcileAll pass indefinitely.
+	// cannot stall an entire RunOnce pass indefinitely.
 	deleteTimeout = 30 * time.Second
 )
 
@@ -52,7 +52,6 @@ type DeleteReconciler struct {
 	mapper            meta.RESTMapper
 	managementCluster string
 	timeout           time.Duration
-	pollInterval      time.Duration
 }
 
 // New creates a new DeleteReconciler.
@@ -62,7 +61,6 @@ func New(
 	dyn dynamic.Interface,
 	mapper meta.RESTMapper,
 	managementCluster string,
-	pollInterval time.Duration,
 ) *DeleteReconciler {
 	return &DeleteReconciler{
 		spec:              spec,
@@ -71,34 +69,10 @@ func New(
 		mapper:            mapper,
 		managementCluster: managementCluster,
 		timeout:           deleteTimeout,
-		pollInterval:      pollInterval,
 	}
 }
 
-// Start reconciles immediately, then repeats at the fixed polling cadence
-// until ctx is canceled. Reconciliation failures are logged and retried on the
-// next pass; caller-driven shutdown returns nil.
-func (r *DeleteReconciler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(r.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		if err := r.reconcileAll(ctx); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			slog.ErrorContext(ctx, "delete: reconciliation pass failed", "error", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-	}
-}
-
-// reconcileAll lists every DeleteDesire in the partition and reconciles each.
+// RunOnce lists every DeleteDesire in the partition and reconciles each.
 // A failure on one desire is recorded on that desire's status and does not abort
 // the others; every such failure is also joined into the returned error so the
 // host can drive retry/backoff and surface controller health. The error is nil
@@ -107,7 +81,8 @@ func (r *DeleteReconciler) Start(ctx context.Context) error {
 // Context cancellation is treated differently: it is caller-driven control flow
 // (e.g. shutdown), not a resource failure, so it aborts the pass immediately
 // and is returned without being recorded on any desire's status.
-func (r *DeleteReconciler) reconcileAll(ctx context.Context) error {
+// The caller owns the poll loop; RunOnce is one pass.
+func (r *DeleteReconciler) RunOnce(ctx context.Context) error {
 	desires, err := r.spec.ListDeleteDesires(ctx, r.managementCluster)
 	if err != nil {
 		return fmt.Errorf("delete: list desires for partition %q: %w", r.managementCluster, err)
