@@ -2,9 +2,8 @@
 
 `ApplyReconciler` reconciles ApplyDesires (see `pkg/desire/CLAUDE.md`) against the local kube-apiserver via server-side apply.
 
-`Start` owns the fixed-cadence polling loop for one management cluster. It calls `reconcileAll`
-immediately, then at its host-configured interval, and returns nil when its context is canceled. Each private
-`reconcileAll` pass reconciles every ApplyDesire independently.
+`RunOnce` is one pass over every ApplyDesire. It implements `reconciler.Reconcilable` and does not own a poll loop.
+`serial.Runnable` calls it, then `DeleteReconciler.RunOnce`, on one shared cadence.
 Ordinary apply failures are recorded in status and are not returned; only non-conflict status-write
 failures from individual reconciliations are joined via `errors.Join(...)`. It depends on narrow
 unexported interfaces (`specLister`, `statusWriter`), not the full store interfaces.
@@ -32,7 +31,7 @@ Per desire, `reconcileOne`/`applyToCluster`:
    `d.Identity` (name/namespace), not the raw manifest coordinates.
 5. Write the resulting condition back through `StatusStore.UpdateApplyDesireStatus`, using the
    desire's `Version` read at list time. A `ErrVersionConflict` here means spec/status moved since
-   `ListApplyDesires` - treated as a benign race, not an error; the next `reconcileAll` pass retries.
+   `ListApplyDesires` - treated as a benign race, not an error; the next `RunOnce` pass retries.
 
 Every Apply outcome, including `PreCheckFailed` before any Kubernetes call, stamps the listed
 desire's `Generation` into `Successful.ObservedGeneration`. `UpdateApplyDesireSpec` retains prior
@@ -45,8 +44,9 @@ The reconciler reads intent and writes status only. `conditions.Equal` (ignoring
 
 ## Operational semantics (MVP)
 
-- **Polling only:** `Start` provides the finite reconciliation cadence; `reconcileAll` has no
-  internal workqueue, rate limiter, or per-desire backoff. The hosting binary must still configure
+- **Polling only:** `serial.Runnable.Start` provides the finite reconciliation cadence;
+  `RunOnce` has no internal workqueue, rate limiter, or per-desire backoff. The hosting binary
+  must still configure
   client-side QPS/burst (or equivalent workqueue backoff) so unchanged desires cannot generate
   unbounded SSA traffic.
 - **Cost per tick:** every listed desire gets a full SSA round-trip each pass, even when spec and

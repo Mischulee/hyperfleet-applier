@@ -27,7 +27,7 @@ const fieldManager = "hyperfleet-applier"
 
 const (
 	// applyTimeout bounds a single SSA Apply call so a hung apiserver
-	// cannot stall an entire reconcileAll pass indefinitely.
+	// cannot stall an entire RunOnce pass indefinitely.
 	applyTimeout = 30 * time.Second
 )
 
@@ -50,7 +50,6 @@ type ApplyReconciler struct {
 	mapper            meta.RESTMapper
 	managementCluster string
 	applyTimeout      time.Duration
-	pollInterval      time.Duration
 }
 
 // New builds a ApplyReconciler for one management cluster.
@@ -61,7 +60,6 @@ func New(
 	dyn dynamic.Interface,
 	mapper meta.RESTMapper,
 	managementCluster string,
-	pollInterval time.Duration,
 ) *ApplyReconciler {
 	return &ApplyReconciler{
 		spec:              spec,
@@ -70,38 +68,15 @@ func New(
 		mapper:            mapper,
 		managementCluster: managementCluster,
 		applyTimeout:      applyTimeout,
-		pollInterval:      pollInterval,
 	}
 }
 
-// Start reconciles immediately, then repeats at the fixed polling cadence
-// until ctx is canceled. Reconciliation failures are logged and retried on the
-// next pass; caller-driven shutdown returns nil.
-func (r *ApplyReconciler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(r.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		if err := r.reconcileAll(ctx); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			slog.ErrorContext(ctx, "apply: reconciliation pass failed", "error", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-	}
-}
-
-// reconcileAll lists every ApplyDesire in the partition and reconciles each.
+// RunOnce lists every ApplyDesire in the partition and reconciles each.
 // Ordinary apply failures are recorded in status and excluded from the returned
 // error; only non-conflict status-write failures are joined. Context
 // cancellation aborts immediately and is not written as status.
-func (r *ApplyReconciler) reconcileAll(ctx context.Context) error {
+// The caller owns the poll loop; RunOnce is one pass.
+func (r *ApplyReconciler) RunOnce(ctx context.Context) error {
 	desires, err := r.spec.ListApplyDesires(ctx, r.managementCluster)
 	if err != nil {
 		return fmt.Errorf("apply: list apply desires for management cluster %q: %w", r.managementCluster, err)

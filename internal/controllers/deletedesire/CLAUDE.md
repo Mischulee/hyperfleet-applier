@@ -3,17 +3,18 @@
 `DeleteReconciler` reconciles DeleteDesires (see `pkg/desire/CLAUDE.md`) against the local kube-apiserver
 via the DELETE API and confirmation checks.
 
-`DeleteReconciler` is bound to one management-cluster partition. `Start` calls private
-`reconcileAll` immediately, then at its host-configured interval, and returns nil when its context is canceled.
-Each pass lists every DeleteDesire for that partition and reconciles each independently - one failure is recorded on that desire's
-status and does not abort the others, but every such failure is `errors.Join`-ed into the value
-`reconcileAll` returns, so the host can drive retry/backoff and expose controller health. The return
-is nil only when the list succeeds and no desire failed. `reconcileAll` depends on narrow unexported
-interfaces (`specLister.ListDeleteDesires`, `statusWriter.UpdateDeleteDesireStatus`), not the full
-`SpecStore`/`StatusStore`.
+`DeleteReconciler` is bound to one management-cluster partition. `RunOnce` is one pass: it lists
+every DeleteDesire for that partition and reconciles each independently. It implements
+`reconciler.Reconcilable` and does not own a poll loop.
+`serial.Runnable` calls `ApplyReconciler.RunOnce`, then this `RunOnce`, on one shared cadence.
+One failure is recorded on that desire's status and does not abort the others, but every such failure
+is `errors.Join`-ed into the value `RunOnce` returns, so the host can drive retry/backoff and expose
+controller health. The return is nil only when the list succeeds and no desire failed. `RunOnce`
+depends on narrow unexported interfaces (`specLister.ListDeleteDesires`,
+`statusWriter.UpdateDeleteDesireStatus`), not the full `SpecStore`/`StatusStore`.
 
 **Context cancellation** is handled apart from resource failures: it is caller-driven control flow
-(e.g. shutdown), not evidence the resource failed. `reconcileAll` checks `ctx.Err()` before each
+(e.g. shutdown), not evidence the resource failed. `RunOnce` checks `ctx.Err()` before each
 desire, and `executeDelete` returns the context error (rather than a `KubeAPIError` status) when a
 DELETE call fails with `ctx.Err() != nil`. Either way the pass aborts immediately and returns the
 context error without recording any status, so healthy statuses are never overwritten during
@@ -41,7 +42,7 @@ Per desire, `reconcileOne` performs a three-phase execution:
 3. **Write status:**
    - Write the resulting condition back through `StatusStore.UpdateDeleteDesireStatus`, using the
      desire's `Version` read at list time. A `ErrVersionConflict` here means spec/status moved since
-     `ListDeleteDesires` - treated as a benign race, not an error; the next `reconcileAll` pass retries.
+     `ListDeleteDesires` - treated as a benign race, not an error; the next `RunOnce` pass retries.
    - `util.Equal` (ignoring `LastTransitionTime`) suppresses status writes that wouldn't change
      anything.
 
@@ -73,8 +74,9 @@ normal Go callers only.
 
 ## Operational semantics (MVP)
 
-- **Polling only:** `Start` provides the finite reconciliation cadence; `reconcileAll` has no
-  internal workqueue, rate limiter, or per-desire backoff. The hosting binary must still configure
+- **Polling only:** `serial.Runnable.Start` provides the finite reconciliation cadence;
+  `RunOnce` has no internal workqueue, rate limiter, or per-desire backoff. The hosting binary
+  must still configure
   client-side QPS/burst so unchanged desires cannot generate unbounded DELETE traffic.
 - **Cost per tick:** every listed desire gets a full GET → DELETE → GET round-trip each pass, even
   when the resource is already deleted. Already-deleted desires suppress the status-store write

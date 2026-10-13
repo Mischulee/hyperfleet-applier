@@ -10,14 +10,13 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	hflog "github.com/openshift-hyperfleet/hyperfleet-logger"
 	redisclient "github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/client-go/discovery"
+	k8sdiscovery "k8s.io/client-go/discovery"
 	discoverycache "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
@@ -27,6 +26,8 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/applydesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/deletedesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/readdesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/discovery"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/reconciler"
 	desireredis "github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/redis"
 )
@@ -197,9 +198,12 @@ func runServe(parent context.Context, cfg *config.Config) error {
 	pollInterval := cfg.PollInterval
 
 	runnables := []reconciler.Runnable{
-		newDiscoveryRefresher(mapper, cfg.DiscoveryRefreshInterval),
-		applydesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
-		deletedesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
+		discovery.New(mapper, cfg.DiscoveryRefreshInterval),
+		serial.New(
+			pollInterval,
+			applydesire.New(store, store, dyn, mapper, cfg.ManagementCluster),
+			deletedesire.New(store, store, dyn, mapper, cfg.ManagementCluster),
+		),
 		readdesire.New(store, store, dyn, mapper, cfg.ManagementCluster, pollInterval),
 	}
 
@@ -225,7 +229,7 @@ func newKubernetesClients(kubeConfigPath string) (dynamic.Interface, meta.Resett
 	if err != nil {
 		return nil, nil, fmt.Errorf("build Kubernetes dynamic client: %w", err)
 	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	discoveryClient, err := k8sdiscovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build Kubernetes discovery client: %w", err)
 	}
@@ -249,30 +253,6 @@ func newRedisStore(ctx context.Context, redisURL string) (*desireredis.Store, fu
 		return nil, nil, fmt.Errorf("connect to Redis: %w", pingErr)
 	}
 	return desireredis.New(redisClient), cleanup, nil
-}
-
-type discoveryRefresher struct {
-	mapper   meta.ResettableRESTMapper
-	interval time.Duration
-}
-
-func newDiscoveryRefresher(mapper meta.ResettableRESTMapper, interval time.Duration) *discoveryRefresher {
-	return &discoveryRefresher{mapper: mapper, interval: interval}
-}
-
-// Start invalidates cached discovery immediately and periodically so newly
-// installed resource types become visible without restarting the applier.
-func (r *discoveryRefresher) Start(ctx context.Context) error {
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
-	for {
-		r.mapper.Reset()
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-	}
 }
 
 // startRunnables starts every controller concurrently and waits for all of

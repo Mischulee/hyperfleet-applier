@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,52 +18,11 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/applydesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/deletedesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/readdesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/reconciler"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/memory"
 )
-
-type countingResettableMapper struct {
-	meta.RESTMapper
-	resets atomic.Int32
-}
-
-func (m *countingResettableMapper) Reset() {
-	m.resets.Add(1)
-}
-
-func TestDiscoveryRefresher_RefreshesPeriodicallyAndStopsCleanly(t *testing.T) {
-	mapper := &countingResettableMapper{}
-	refresher := newDiscoveryRefresher(mapper, 5*time.Millisecond)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- refresher.Start(ctx)
-	}()
-
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	for mapper.resets.Load() < 2 {
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			cancel()
-			t.Fatal("discovery mapper was not refreshed periodically")
-		}
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Start() error = %v, want nil after cancellation", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("discovery refresher did not stop after cancellation")
-	}
-}
 
 type funcRunnable func(context.Context) error
 
@@ -141,8 +99,14 @@ func (s *concurrentStore) markStarted(typ desire.DesireType) {
 		return
 	}
 	s.started[typ] = struct{}{}
-	if len(s.started) == 3 {
-		close(s.allStarted)
+	_, applyStarted := s.started[desire.TypeApply]
+	_, readStarted := s.started[desire.TypeRead]
+	if applyStarted && readStarted {
+		select {
+		case <-s.allStarted:
+		default:
+			close(s.allStarted)
+		}
 	}
 }
 
@@ -183,7 +147,7 @@ func (s *concurrentStore) ListReadDesires(
 	return s.Store.ListReadDesires(ctx, managementCluster)
 }
 
-func TestControllersReconcileSeededDesiresInParallel(t *testing.T) {
+func TestSerialAndReadReconcileSeededDesires(t *testing.T) {
 	store := newConcurrentStore()
 	applyID := identity(desire.TypeApply, "apply-target")
 	deleteID := identity(desire.TypeDelete, "delete-target")
@@ -234,19 +198,22 @@ func TestControllersReconcileSeededDesiresInParallel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- startRunnables(ctx, []reconciler.Runnable{
-			applydesire.New(store, store, dyn, mapper, testManagementCluster, time.Hour),
-			deletedesire.New(store, store, dyn, mapper, testManagementCluster, time.Hour),
+			serial.New(
+				time.Hour,
+				applydesire.New(store, store, dyn, mapper, testManagementCluster),
+				deletedesire.New(store, store, dyn, mapper, testManagementCluster),
+			),
 			readdesire.New(store, store, dyn, mapper, testManagementCluster, time.Hour),
 		})
 	}()
 
 	select {
 	case <-store.allStarted:
-		// Each first pass reached its store list call while its peers were
-		// blocked there, proving the three lifecycle loops run concurrently.
+		// The serial runnable's apply list and the read controller's list
+		// overlapped. Delete lists only after that apply pass returns.
 	case <-time.After(time.Second):
 		cancel()
-		t.Fatal("controllers did not enter their first reconciliation passes concurrently")
+		t.Fatal("serial apply and read did not enter their first lists together")
 	}
 
 	waitForReason(t, store, applyID, desire.ReasonApplied)

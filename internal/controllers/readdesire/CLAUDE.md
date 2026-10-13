@@ -174,7 +174,7 @@ that shared path, because GVR resolution and per-object observation happen in di
 Reported to status (via `applyStatus`): `observe`/`observeLive`'s outcomes
 (`Synced`/`NotFound`/`KubeAPIError`) and `pollOnce`'s `resolveGVR` failures (`PreCheckFailed`).
 Log-only, by necessity rather than oversight: `ListReadDesires` failing in `pollOnce`
-(partition-wide, not attributable to one desire - same as `applydesire.reconcileAll`'s own
+(partition-wide, not attributable to one desire - same as `applydesire.RunOnce`'s own
 `ListApplyDesires` failure), `GetReadDesire` failing inside `applyStatus` (nothing to compute a new
 status against if the read itself failed). `UpdateReadDesireStatus` itself failing cannot be written
 into the status update that failed; it increments the process-local `failed` write counter and is

@@ -15,6 +15,7 @@ import (
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/applydesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/deletedesire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/readdesire"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/serial"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire/store/memory"
 )
@@ -52,14 +53,13 @@ func TestEnvtest_ApplyReadDeleteLifecycle(t *testing.T) {
 		t.Fatalf("CreateReadDesire: %v", err)
 	}
 
-	applyR := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, 50*time.Millisecond)
-	deleteR := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, 50*time.Millisecond)
+	applyR := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	deleteR := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
 	readC := readdesire.New(
 		store, store, envDynamicClient, envRESTMapper, testManagementCluster,
 		100*time.Millisecond,
 	)
-	go func() { _ = applyR.Start(ctx) }()
-	go func() { _ = deleteR.Start(ctx) }()
+	go func() { _ = serial.New(50*time.Millisecond, applyR, deleteR).Start(ctx) }()
 	go func() { _ = readC.Start(ctx) }()
 
 	// 1. applydesire creates the resource for real via SSA.
@@ -113,8 +113,7 @@ func TestEnvtest_ApplyReadDeleteLifecycle(t *testing.T) {
 	waitForReadReason(t, ctx, store, readID, desire.ReasonNotFound)
 
 	// 7. A cleared ApplyDesire must not resurrect the resource: it no longer
-	// exists in the store, so applyR's continuous reconcile loop can never
-	// act on it again.
+	// exists in the store, so later apply passes have nothing to act on.
 	if _, getErr := envDynamicClient.Resource(configMapGVR).Namespace(defaultNamespace).Get(
 		ctx, name, metav1.GetOptions{},
 	); !apierrors.IsNotFound(getErr) {
@@ -155,14 +154,13 @@ func TestEnvtest_ApplyReadDeleteLifecycle_ClusterScoped(t *testing.T) {
 		t.Fatalf("CreateReadDesire: %v", err)
 	}
 
-	applyR := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, 50*time.Millisecond)
-	deleteR := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster, 50*time.Millisecond)
+	applyR := applydesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
+	deleteR := deletedesire.New(store, store, envDynamicClient, envRESTMapper, testManagementCluster)
 	readC := readdesire.New(
 		store, store, envDynamicClient, envRESTMapper, testManagementCluster,
 		100*time.Millisecond,
 	)
-	go func() { _ = applyR.Start(ctx) }()
-	go func() { _ = deleteR.Start(ctx) }()
+	go func() { _ = serial.New(50*time.Millisecond, applyR, deleteR).Start(ctx) }()
 	go func() { _ = readC.Start(ctx) }()
 
 	// applydesire creates the cluster-scoped resource; readdesire observes it.

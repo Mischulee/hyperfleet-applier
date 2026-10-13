@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -312,19 +311,6 @@ func (s *staleApplySpecStore) GetApplyDesire(
 	return s.SpecStore.GetApplyDesire(ctx, id)
 }
 
-type notifyingSpecLister struct {
-	called chan<- struct{}
-}
-
-func (n notifyingSpecLister) ListApplyDesires(context.Context, string) ([]desire.ApplyDesire, error) {
-	n.called <- struct{}{}
-	return nil, nil
-}
-
-func (n notifyingSpecLister) GetApplyDesire(context.Context, desire.Identity) (desire.ApplyDesire, error) {
-	return desire.ApplyDesire{}, desire.ErrNotFound
-}
-
 type conflictingStatusStore struct {
 	desire.StatusStore
 	remainingConflicts int
@@ -401,45 +387,18 @@ func (c *countingStatusStore) UpdateApplyDesireStatus(
 
 // ---- tests ---------------------------------------------------------------
 
-func TestStart_ReconcilesImmediatelyAndStopsCleanly(t *testing.T) {
-	called := make(chan struct{}, 1)
-	r := New(notifyingSpecLister{called: called}, nil, nil, nil, testManagementCluster, time.Hour)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- r.Start(ctx)
-	}()
-
-	select {
-	case <-called:
-		// The first pass ran without waiting for the 60-second ticker.
-	case <-time.After(time.Second):
-		t.Fatal("Start did not begin a reconciliation pass immediately")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Start() error = %v, want nil after caller cancellation", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Start did not stop after context cancellation")
-	}
-}
-
-func TestReconcileAll_AppliesNamespacedResourceSuccessfully(t *testing.T) {
+func TestRunOnce_AppliesNamespacedResourceSuccessfully(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-1", defaultNamespace))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-1")
 	content := newConfigMapContent(t, "cm-1", defaultNamespace, map[string]string{"key": "value"})
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -475,17 +434,17 @@ func TestReconcileAll_AppliesNamespacedResourceSuccessfully(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_AppliesClusterScopedResourceSuccessfully(t *testing.T) {
+func TestRunOnce_AppliesClusterScopedResourceSuccessfully(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newClusterRoleObject("cr-1"))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity(rbacGroup, "clusterroles", "", "cr-1")
 	seedApplyDesire(t, store, id, "owner-1", newClusterRoleContent(t, "cr-1"))
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -506,18 +465,18 @@ func TestReconcileAll_AppliesClusterScopedResourceSuccessfully(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_ManifestMissingKindFailsToUnmarshal covers the
+// TestRunOnce_ManifestMissingKindFailsToUnmarshal covers the
 // json.Unmarshal-error branch of applyToCluster: a manifest missing "kind"
 // fails *unstructured.Unstructured's own UnmarshalJSON (which requires Kind),
 // before the apiVersion/kind/name precheck ever runs. See
-// TestReconcileAll_IncompleteManifestGetsPreCheckFailedStatus for the
+// TestRunOnce_IncompleteManifestGetsPreCheckFailedStatus for the
 // precheck branch itself (valid-but-incomplete manifests that unmarshal
 // cleanly).
-func TestReconcileAll_ManifestMissingKindFailsToUnmarshal(t *testing.T) {
+func TestRunOnce_ManifestMissingKindFailsToUnmarshal(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t)
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	// Valid JSON, but missing "kind" -- store.Validate() only requires
 	// non-empty valid JSON, so this is a reachable "malformed manifest"
@@ -537,8 +496,8 @@ func TestReconcileAll_ManifestMissingKindFailsToUnmarshal(t *testing.T) {
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-bad")
 	seedApplyDesire(t, store, id, "owner-1", badContent)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil (a malformed desire must not abort the tick)", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil (a malformed desire must not abort the tick)", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -568,17 +527,17 @@ func TestReconcileAll_ManifestMissingKindFailsToUnmarshal(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_IncompleteManifestGetsPreCheckFailedStatus covers the
+// TestRunOnce_IncompleteManifestGetsPreCheckFailedStatus covers the
 // apiVersion/kind/name precheck in applyToCluster directly: manifests that
 // unmarshal into *unstructured.Unstructured without error (unlike a
 // missing-kind manifest, which fails unmarshal itself -- see
-// TestReconcileAll_ManifestMissingKindFailsToUnmarshal) but are still missing
+// TestRunOnce_ManifestMissingKindFailsToUnmarshal) but are still missing
 // a field the precheck requires.
-func TestReconcileAll_IncompleteManifestGetsPreCheckFailedStatus(t *testing.T) {
+func TestRunOnce_IncompleteManifestGetsPreCheckFailedStatus(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t)
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	content, marshalErr := json.Marshal(map[string]interface{}{
 		fieldAPIVersion: "v1",
@@ -600,8 +559,8 @@ func TestReconcileAll_IncompleteManifestGetsPreCheckFailedStatus(t *testing.T) {
 	id := applyIdentity("", "configmaps", defaultNamespace, idName)
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil (an incomplete desire must not abort the tick)", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil (an incomplete desire must not abort the tick)", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -627,11 +586,11 @@ func TestReconcileAll_IncompleteManifestGetsPreCheckFailedStatus(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_MismatchedIdentityGetsPreCheckFailed proves that a desire
+// TestRunOnce_MismatchedIdentityGetsPreCheckFailed proves that a desire
 // whose KubeContent targets a different object than Identity is refused before
 // any kube-apiserver call: the store does not cross-check those fields, so
 // this is a reachable apply-time shape.
-func TestReconcileAll_MismatchedIdentityGetsPreCheckFailed(t *testing.T) {
+func TestRunOnce_MismatchedIdentityGetsPreCheckFailed(t *testing.T) {
 	cases := []struct {
 		name    string
 		id      desire.Identity
@@ -677,12 +636,12 @@ func TestReconcileAll_MismatchedIdentityGetsPreCheckFailed(t *testing.T) {
 			ctx := context.Background()
 			dyn := newFakeDynamicClient(t)
 			store := memory.New()
-			r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+			r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 			seedApplyDesire(t, store, tc.id, "owner-1", tc.content(t))
 
-			if err := r.reconcileAll(ctx); err != nil {
-				t.Fatalf("reconcileAll() error = %v, want nil (a mismatched desire must not abort the tick)", err)
+			if err := r.RunOnce(ctx); err != nil {
+				t.Fatalf("RunOnce() error = %v, want nil (a mismatched desire must not abort the tick)", err)
 			}
 
 			got, err := store.GetApplyDesire(ctx, tc.id)
@@ -711,11 +670,11 @@ func TestReconcileAll_MismatchedIdentityGetsPreCheckFailed(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_ApplyErrorGetsKubeAPIErrorStatus proves the KubeAPIError
+// TestRunOnce_ApplyErrorGetsKubeAPIErrorStatus proves the KubeAPIError
 // arm of the condition contract is wired end to end: a real apiserver rejection
 // (simulated via a fake-dynamic-client reactor) must result in
 // Successful=False/KubeAPIError.
-func TestReconcileAll_ApplyErrorGetsKubeAPIErrorStatus(t *testing.T) {
+func TestRunOnce_ApplyErrorGetsKubeAPIErrorStatus(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-apierr", defaultNamespace))
 	applyErr := errors.New("apiserver unavailable")
@@ -723,14 +682,14 @@ func TestReconcileAll_ApplyErrorGetsKubeAPIErrorStatus(t *testing.T) {
 		return true, nil, applyErr
 	})
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-apierr")
 	content := newConfigMapContent(t, "cm-apierr", defaultNamespace, map[string]string{"k": "v"})
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil (an apply failure is recorded on status, not returned)", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil (an apply failure is recorded on status, not returned)", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -755,26 +714,26 @@ func TestReconcileAll_ApplyErrorGetsKubeAPIErrorStatus(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_CanceledContextBeforeApplyAborts proves that a context
-// canceled before the pass reaches a desire aborts reconcileAll with the
+// TestRunOnce_CanceledContextBeforeApplyAborts proves that a context
+// canceled before the pass reaches a desire aborts RunOnce with the
 // context error and records nothing: cancellation is caller control flow, not a
 // resource failure.
-func TestReconcileAll_CanceledContextBeforeApplyAborts(t *testing.T) {
+func TestRunOnce_CanceledContextBeforeApplyAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-cancel-before", defaultNamespace))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-cancel-before")
 	seedApplyDesire(t, store, id, "owner-1",
 		newConfigMapContent(t, "cm-cancel-before", defaultNamespace, map[string]string{"k": "v"}),
 	)
 
-	err := r.reconcileAll(ctx)
+	err := r.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("reconcileAll() error = %v, want it to wrap context.Canceled", err)
+		t.Fatalf("RunOnce() error = %v, want it to wrap context.Canceled", err)
 	}
 
 	got, getErr := store.GetApplyDesire(context.Background(), id)
@@ -789,10 +748,10 @@ func TestReconcileAll_CanceledContextBeforeApplyAborts(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_ContextCanceledDuringApplyIsNotRecordedAsFailure proves that
+// TestRunOnce_ContextCanceledDuringApplyIsNotRecordedAsFailure proves that
 // when the caller's context ends mid-apply, the applier aborts with the context
 // error instead of overwriting the existing healthy status with KubeAPIError.
-func TestReconcileAll_ContextCanceledDuringApplyIsNotRecordedAsFailure(t *testing.T) {
+func TestRunOnce_ContextCanceledDuringApplyIsNotRecordedAsFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-cancel-during", defaultNamespace))
@@ -816,10 +775,10 @@ func TestReconcileAll_ContextCanceledDuringApplyIsNotRecordedAsFailure(t *testin
 		t.Fatalf("seed healthy status: %v", err)
 	}
 
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
-	err := r.reconcileAll(ctx)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
+	err := r.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("reconcileAll() error = %v, want it to wrap context.Canceled", err)
+		t.Fatalf("RunOnce() error = %v, want it to wrap context.Canceled", err)
 	}
 
 	got, getErr := store.GetApplyDesire(context.Background(), id)
@@ -835,11 +794,11 @@ func TestReconcileAll_ContextCanceledDuringApplyIsNotRecordedAsFailure(t *testin
 	}
 }
 
-func TestReconcileAll_MalformedDesireDoesNotAbortOthers(t *testing.T) {
+func TestRunOnce_MalformedDesireDoesNotAbortOthers(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-good", defaultNamespace))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	goodID := applyIdentity("", "configmaps", defaultNamespace, "cm-good")
 	goodContent := newConfigMapContent(t, "cm-good", defaultNamespace, map[string]string{"k": "v"})
@@ -855,8 +814,8 @@ func TestReconcileAll_MalformedDesireDoesNotAbortOthers(t *testing.T) {
 	badID := applyIdentity("", "configmaps", defaultNamespace, "cm-bad2")
 	seedApplyDesire(t, store, badID, "owner-1", badContent)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	good, err := store.GetApplyDesire(ctx, goodID)
@@ -881,20 +840,20 @@ func TestReconcileAll_MalformedDesireDoesNotAbortOthers(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_ToleratesStatusVersionConflict(t *testing.T) {
+func TestRunOnce_ToleratesStatusVersionConflict(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-cas", defaultNamespace))
 	base := memory.New()
 	status := &conflictingStatusStore{StatusStore: base, remainingConflicts: 1}
-	r := New(base, status, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(base, status, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-cas")
 	content := newConfigMapContent(t, "cm-cas", defaultNamespace, map[string]string{"k": "v"})
 	seeded := seedApplyDesire(t, base, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
+	if err := r.RunOnce(ctx); err != nil {
 		t.Fatalf(
-			"reconcileAll() error = %v, want nil: a status CAS conflict on one pass must be tolerated, not surfaced as a crash",
+			"RunOnce() error = %v, want nil: a status CAS conflict on one pass must be tolerated, not surfaced as a crash",
 			err,
 		)
 	}
@@ -932,10 +891,10 @@ func TestReconcileAll_ToleratesStatusVersionConflict(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_StatusWriteErrorDoesNotAbortOthers proves that a
+// TestRunOnce_StatusWriteErrorDoesNotAbortOthers proves that a
 // reconcileOne failure from a non-version-conflict status write is joined
-// into the error reconcileAll returns, without aborting sibling desires.
-func TestReconcileAll_StatusWriteErrorDoesNotAbortOthers(t *testing.T) {
+// into the error RunOnce returns, without aborting sibling desires.
+func TestRunOnce_StatusWriteErrorDoesNotAbortOthers(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t,
 		newConfigMapObject("cm-good-status", defaultNamespace),
@@ -948,7 +907,7 @@ func TestReconcileAll_StatusWriteErrorDoesNotAbortOthers(t *testing.T) {
 	badID := applyIdentity("", "configmaps", defaultNamespace, "cm-status-err")
 
 	status := &erroringStatusStore{StatusStore: base, failID: badID, err: statusErr}
-	r := New(base, status, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(base, status, dyn, newTestMapper(), testManagementCluster)
 
 	seedApplyDesire(t, base, goodID, "owner-1",
 		newConfigMapContent(t, "cm-good-status", defaultNamespace, map[string]string{"k": "good"}),
@@ -957,12 +916,12 @@ func TestReconcileAll_StatusWriteErrorDoesNotAbortOthers(t *testing.T) {
 		newConfigMapContent(t, "cm-status-err", defaultNamespace, map[string]string{"k": "bad"}),
 	)
 
-	err := r.reconcileAll(ctx)
+	err := r.RunOnce(ctx)
 	if err == nil {
-		t.Fatal("reconcileAll() error = nil, want a status write failure to be reported to the caller")
+		t.Fatal("RunOnce() error = nil, want a status write failure to be reported to the caller")
 	}
 	if !errors.Is(err, statusErr) {
-		t.Errorf("reconcileAll() error = %v, want it to wrap the underlying status store error %v", err, statusErr)
+		t.Errorf("RunOnce() error = %v, want it to wrap the underlying status store error %v", err, statusErr)
 	}
 
 	good, err := base.GetApplyDesire(ctx, goodID)
@@ -1000,22 +959,22 @@ func TestReconcileAll_StatusWriteErrorDoesNotAbortOthers(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_ClusterScopedStrayNamespaceReachesApply proves
+// TestRunOnce_ClusterScopedStrayNamespaceReachesApply proves
 // checkApplyTarget does not reject metadata.namespace on cluster-scoped
 // manifests; SSA still runs and the kube-apiserver accepts or rejects it.
-func TestReconcileAll_ClusterScopedStrayNamespaceReachesApply(t *testing.T) {
+func TestRunOnce_ClusterScopedStrayNamespaceReachesApply(t *testing.T) {
 	ctx := context.Background()
 	const name = "cr-stray-ns"
 	dyn := newFakeDynamicClient(t, newClusterRoleObject(name))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity(rbacGroup, "clusterroles", "", name)
 	content := newClusterRoleContentWithNamespace(t, name, "stray-namespace")
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -1052,24 +1011,24 @@ func TestReconcileAll_ClusterScopedStrayNamespaceReachesApply(t *testing.T) {
 	}
 }
 
-// TestReconcileAll_ClusterScopedNonEmptyIdentityNamespaceGetsPreCheckFailed
+// TestRunOnce_ClusterScopedNonEmptyIdentityNamespaceGetsPreCheckFailed
 // proves checkApplyTarget rejects a non-empty Identity.Namespace on a
 // cluster-scoped kind. Namespace is part of the desire's target identity, so
 // two desires that differ only in namespace would be distinct records both
 // applying the same physical object and fighting under Force=true; the
 // applier must never reach SSA in that case.
-func TestReconcileAll_ClusterScopedNonEmptyIdentityNamespaceGetsPreCheckFailed(t *testing.T) {
+func TestRunOnce_ClusterScopedNonEmptyIdentityNamespaceGetsPreCheckFailed(t *testing.T) {
 	ctx := context.Background()
 	const name = "cr-bad-ns"
 	dyn := newFakeDynamicClient(t, newClusterRoleObject(name))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity(rbacGroup, "clusterroles", "ns-a", name)
 	seedApplyDesire(t, store, id, "owner-1", newClusterRoleContent(t, name))
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -1091,11 +1050,11 @@ func TestReconcileAll_ClusterScopedNonEmptyIdentityNamespaceGetsPreCheckFailed(t
 	}
 }
 
-// TestReconcileAll_StaleApplyWindowAfterStatusCASConflict covers the race where
+// TestRunOnce_StaleApplyWindowAfterStatusCASConflict covers the race where
 // SSA succeeds against the list-time manifest but UpdateApplyDesireStatus loses
 // a version conflict after the spec store has moved on: the cluster briefly
 // holds the listed manifest until the next pass applies the updated spec.
-func TestReconcileAll_StaleApplyWindowAfterStatusCASConflict(t *testing.T) {
+func TestRunOnce_StaleApplyWindowAfterStatusCASConflict(t *testing.T) {
 	ctx := context.Background()
 	const name = "cm-stale-window"
 	dyn := newFakeDynamicClient(t, newConfigMapObject(name, defaultNamespace))
@@ -1110,13 +1069,13 @@ func TestReconcileAll_StaleApplyWindowAfterStatusCASConflict(t *testing.T) {
 		owner:       "owner-1",
 		newSpec:     desire.ApplySpec{KubeContent: updated},
 	}
-	r := New(base, status, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(base, status, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, name)
 	seeded := seedApplyDesire(t, base, id, "owner-1", listed)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 1] error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() [pass 1] error = %v, want nil", err)
 	}
 
 	obj, getErr := dyn.Resource(configMapGVR).Namespace(defaultNamespace).Get(ctx, name, metav1.GetOptions{})
@@ -1149,8 +1108,8 @@ func TestReconcileAll_StaleApplyWindowAfterStatusCASConflict(t *testing.T) {
 		t.Errorf("Status = %+v, want unchanged (empty) after tolerated CAS conflict", afterConflict.Status.Conditions)
 	}
 
-	if rcErr := r.reconcileAll(ctx); rcErr != nil {
-		t.Fatalf("reconcileAll() [pass 2] error = %v, want nil", rcErr)
+	if rcErr := r.RunOnce(ctx); rcErr != nil {
+		t.Fatalf("RunOnce() [pass 2] error = %v, want nil", rcErr)
 	}
 
 	obj2, getErr := dyn.Resource(configMapGVR).Namespace(defaultNamespace).Get(ctx, name, metav1.GetOptions{})
@@ -1177,19 +1136,19 @@ func TestReconcileAll_StaleApplyWindowAfterStatusCASConflict(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
+func TestRunOnce_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-noop", defaultNamespace))
 	base := memory.New()
 	counting := &countingStatusStore{StatusStore: base}
-	r := New(base, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(base, counting, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-noop")
 	content := newConfigMapContent(t, "cm-noop", defaultNamespace, map[string]string{"k": "v"})
 	seedApplyDesire(t, base, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 1] error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() [pass 1] error = %v, want nil", err)
 	}
 	callsAfterFirstPass := counting.updateCalls
 	if callsAfterFirstPass == 0 {
@@ -1200,8 +1159,8 @@ func TestReconcileAll_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
 		t.Fatalf("GetApplyDesire after pass 1: %v", err)
 	}
 
-	if rcErr := r.reconcileAll(ctx); rcErr != nil {
-		t.Fatalf("reconcileAll() [pass 2] error = %v, want nil", rcErr)
+	if rcErr := r.RunOnce(ctx); rcErr != nil {
+		t.Fatalf("RunOnce() [pass 2] error = %v, want nil", rcErr)
 	}
 
 	if counting.updateCalls != callsAfterFirstPass {
@@ -1223,7 +1182,7 @@ func TestReconcileAll_UnchangedDesireSuppressesStatusWrite(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_GenerationTransitions(t *testing.T) {
+func TestRunOnce_GenerationTransitions(t *testing.T) {
 	const targetName = "cm-generation-transition"
 	for _, tc := range []struct {
 		name, nextValue, firstReason, nextReason string
@@ -1251,7 +1210,7 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 			dyn := newFakeDynamicClient(t, newConfigMapObject(targetName, defaultNamespace))
 			store := memory.New()
 			counting := &countingStatusStore{StatusStore: store}
-			r := New(store, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
+			r := New(store, counting, dyn, newTestMapper(), testManagementCluster)
 			id := applyIdentity("", "configmaps", defaultNamespace, targetName)
 			manifestName := func(valid bool) string {
 				if valid {
@@ -1263,8 +1222,8 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 				map[string]string{"k": "v1"})
 			seedApplyDesire(t, store, id, "owner-1", firstContent)
 
-			if err := r.reconcileAll(ctx); err != nil {
-				t.Fatalf("reconcileAll() [pass 1]: %v", err)
+			if err := r.RunOnce(ctx); err != nil {
+				t.Fatalf("RunOnce() [pass 1]: %v", err)
 			}
 			first, err := store.GetApplyDesire(ctx, id)
 			if err != nil {
@@ -1291,8 +1250,8 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 				t.Fatalf("status after spec update = %+v, want preserved status %+v", updated.Status, first.Status)
 			}
 
-			if err = r.reconcileAll(ctx); err != nil {
-				t.Fatalf("reconcileAll() [pass 2]: %v", err)
+			if err = r.RunOnce(ctx); err != nil {
+				t.Fatalf("RunOnce() [pass 2]: %v", err)
 			}
 			second, err := store.GetApplyDesire(ctx, id)
 			if err != nil {
@@ -1305,8 +1264,8 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 			if counting.updateCalls != 2 {
 				t.Fatalf("status writes after new generation = %d, want 2", counting.updateCalls)
 			}
-			if err = r.reconcileAll(ctx); err != nil {
-				t.Fatalf("reconcileAll() [pass 3]: %v", err)
+			if err = r.RunOnce(ctx); err != nil {
+				t.Fatalf("RunOnce() [pass 3]: %v", err)
 			}
 			if counting.updateCalls != 2 {
 				t.Errorf("status writes after steady-state pass = %d, want 2", counting.updateCalls)
@@ -1315,19 +1274,19 @@ func TestReconcileAll_GenerationTransitions(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_IdenticalSpecUpdateKeepsConditionCurrent(t *testing.T) {
+func TestRunOnce_IdenticalSpecUpdateKeepsConditionCurrent(t *testing.T) {
 	ctx := context.Background()
 	const targetName = "cm-identical-spec"
 	dyn := newFakeDynamicClient(t, newConfigMapObject(targetName, defaultNamespace))
 	store := memory.New()
 	counting := &countingStatusStore{StatusStore: store}
-	r := New(store, counting, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, counting, dyn, newTestMapper(), testManagementCluster)
 	id := applyIdentity("", "configmaps", defaultNamespace, targetName)
 	content := newConfigMapContent(t, targetName, defaultNamespace, map[string]string{"k": "v1"})
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 1]: %v", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() [pass 1]: %v", err)
 	}
 	first, err := store.GetApplyDesire(ctx, id)
 	if err != nil {
@@ -1349,8 +1308,8 @@ func TestReconcileAll_IdenticalSpecUpdateKeepsConditionCurrent(t *testing.T) {
 		t.Fatalf("identical update = %+v, want unchanged generation/status and advanced Version from %+v", updated, first)
 	}
 
-	if err = r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() [pass 2]: %v", err)
+	if err = r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() [pass 2]: %v", err)
 	}
 	second, err := store.GetApplyDesire(ctx, id)
 	if err != nil {
@@ -1363,35 +1322,35 @@ func TestReconcileAll_IdenticalSpecUpdateKeepsConditionCurrent(t *testing.T) {
 	}
 }
 
-func TestReconcileAll_ReturnsErrorOnListFailure(t *testing.T) {
+func TestRunOnce_ReturnsErrorOnListFailure(t *testing.T) {
 	ctx := context.Background()
 	base := memory.New()
 	listErr := errors.New("store unavailable")
 	spec := &erroringSpecStore{SpecStore: base, listErr: listErr}
 	dyn := newFakeDynamicClient(t)
 
-	r := New(spec, base, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(spec, base, dyn, newTestMapper(), testManagementCluster)
 
-	if err := r.reconcileAll(ctx); err == nil {
-		t.Fatalf("reconcileAll() error = nil, want non-nil when SpecStore.ListApplyDesires fails")
+	if err := r.RunOnce(ctx); err == nil {
+		t.Fatalf("RunOnce() error = nil, want non-nil when SpecStore.ListApplyDesires fails")
 	}
 }
 
-// TestReconcileAll_UnrecoverableRESTMappingFailureGetsPreCheckFailed proves a
+// TestRunOnce_UnrecoverableRESTMappingFailureGetsPreCheckFailed proves a
 // mapping error becomes PreCheckFailed without SSA.
-func TestReconcileAll_UnrecoverableRESTMappingFailureGetsPreCheckFailed(t *testing.T) {
+func TestRunOnce_UnrecoverableRESTMappingFailureGetsPreCheckFailed(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t)
 	mapper := newUnrecoverableMappingMapper()
 	store := memory.New()
-	r := New(store, store, dyn, mapper, testManagementCluster, time.Hour)
+	r := New(store, store, dyn, mapper, testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-no-mapping")
 	content := newConfigMapContent(t, "cm-no-mapping", defaultNamespace, map[string]string{"k": "v"})
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	got, err := store.GetApplyDesire(ctx, id)
@@ -1413,22 +1372,22 @@ func TestReconcileAll_UnrecoverableRESTMappingFailureGetsPreCheckFailed(t *testi
 	}
 }
 
-// TestReconcileAll_ManifestMissingNamespaceFallsBackToIdentityNamespace
+// TestRunOnce_ManifestMissingNamespaceFallsBackToIdentityNamespace
 // proves that an omitted metadata.namespace is not an identity mismatch:
 // apply uses d.Identity.Namespace. Every other namespaced fixture sets
 // metadata.namespace explicitly, leaving this branch unexercised.
-func TestReconcileAll_ManifestMissingNamespaceFallsBackToIdentityNamespace(t *testing.T) {
+func TestRunOnce_ManifestMissingNamespaceFallsBackToIdentityNamespace(t *testing.T) {
 	ctx := context.Background()
 	dyn := newFakeDynamicClient(t, newConfigMapObject("cm-no-ns-in-manifest", defaultNamespace))
 	store := memory.New()
-	r := New(store, store, dyn, newTestMapper(), testManagementCluster, time.Hour)
+	r := New(store, store, dyn, newTestMapper(), testManagementCluster)
 
 	id := applyIdentity("", "configmaps", defaultNamespace, "cm-no-ns-in-manifest")
 	content := newConfigMapContentNoNamespace(t, "cm-no-ns-in-manifest", map[string]string{"k": "v"})
 	seedApplyDesire(t, store, id, "owner-1", content)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll() error = %v, want nil", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce() error = %v, want nil", err)
 	}
 
 	patch := findPatchAction(dyn.Actions(), configMapGVR)
@@ -1452,12 +1411,12 @@ func TestReconcileAll_ManifestMissingNamespaceFallsBackToIdentityNamespace(t *te
 	}
 }
 
-// TestReconcileAll_SkipsApplyWhenDesireGoneBeforeApply proves applyToCluster's
+// TestRunOnce_SkipsApplyWhenDesireGoneBeforeApply proves applyToCluster's
 // GetApplyDesire re-check prevents applying a desire that has already been
 // removed from the SpecStore (e.g. superseded by a DeleteDesire) by the time
 // the re-check runs, even though it was still present when ListApplyDesires
 // listed it for this pass: no SSA patch is issued and no status is written.
-func TestReconcileAll_SkipsApplyWhenDesireGoneBeforeApply(t *testing.T) {
+func TestRunOnce_SkipsApplyWhenDesireGoneBeforeApply(t *testing.T) {
 	ctx := t.Context()
 	dyn := newFakeDynamicClient(t) // no live object
 	store := memory.New()
@@ -1468,11 +1427,11 @@ func TestReconcileAll_SkipsApplyWhenDesireGoneBeforeApply(t *testing.T) {
 
 	r := New(
 		&staleApplySpecStore{SpecStore: store, goneID: id},
-		store, dyn, newTestMapper(), testManagementCluster, time.Hour,
+		store, dyn, newTestMapper(), testManagementCluster,
 	)
 
-	if err := r.reconcileAll(ctx); err != nil {
-		t.Fatalf("reconcileAll: %v", err)
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
 	}
 
 	// No SSA patch may be issued for a desire gone from the store.

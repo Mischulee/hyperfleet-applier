@@ -170,10 +170,9 @@ func waitForReadReason(
 }
 
 // waitForApplyReason polls store for id's ApplyDesire until its Successful
-// condition's Reason matches want, or ctx's deadline is hit. ApplyReconciler.Start
-// reconciles on its own polling cadence rather than on a single caller-driven
-// pass, so tests observe its effect by polling status instead of calling a
-// synchronous reconcile method.
+// condition's Reason matches want, or ctx's deadline is hit. The apply pass
+// runs on a polling cadence rather than as a single caller-driven call, so
+// tests observe its effect by polling status.
 func waitForApplyReason(
 	t *testing.T, ctx context.Context, store desire.SpecStore, id desire.Identity, want string,
 ) desire.ApplyDesire {
@@ -218,9 +217,8 @@ func waitForApplyGeneration(
 	return last
 }
 
-// waitForDeleteReason is waitForApplyReason's DeleteDesire counterpart -
-// DeleteReconciler.Start is likewise a polling loop, not a single
-// caller-driven pass.
+// waitForDeleteReason is waitForApplyReason's DeleteDesire counterpart.
+// The delete pass is likewise polled, not a single caller-driven call.
 func waitForDeleteReason(
 	t *testing.T, ctx context.Context, store desire.SpecStore, id desire.Identity, want string,
 ) desire.DeleteDesire {

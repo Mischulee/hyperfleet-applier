@@ -27,12 +27,15 @@ obvious from that listing:
   `pkg/desire/CLAUDE.md`.
 - `pkg/desire/store/{memory,redis,conformance}` — store backends and their shared test suite. See
   `pkg/desire/store/CLAUDE.md`.
-- `internal/controllers/{applydesire,deletedesire,readdesire,util}` — the reconcile controllers and
+- `internal/reconciler` — `Runnable` and `Reconcilable`, the two lifecycles the applier starts. See
+  `internal/reconciler/CLAUDE.md`.
+- `internal/controllers/{applydesire,deletedesire,readdesire,serial,util}` — the reconcile controllers and
   their shared support code (not part of the public library surface):
-  - `applydesire` — the SSA `Reconciler` that drives ApplyDesires to the
-    local kube-apiserver. See `internal/controllers/applydesire/CLAUDE.md`.
-  - `deletedesire` — confirms a Kubernetes resource is gone (past finalizers) for DeleteDesires.
-    See `internal/controllers/deletedesire/CLAUDE.md`.
+  - `applydesire` — one SSA pass over ApplyDesires. See `internal/controllers/applydesire/CLAUDE.md`.
+  - `deletedesire` — one pass that confirms a Kubernetes resource is gone (past finalizers) for
+    DeleteDesires. See `internal/controllers/deletedesire/CLAUDE.md`.
+  - `serial` — `Runnable`, which calls `RunOnce` on each `reconciler.Reconcilable` in order.
+    The applier passes apply, then delete. Read stays a separate `Runnable`.
   - `readdesire` — the informer-driven `Controller` that mirrors live Kubernetes object state back
     into ReadDesire status. See `internal/controllers/readdesire/CLAUDE.md`.
   - `util` — shared helpers (`WithCondition`, `Equal`, `DescribeIdentity`) reused across the
