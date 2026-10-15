@@ -40,10 +40,17 @@ import (
 // The 60s gap between renewal failure and lease expiration exceeds the 30s
 // SSA/DELETE timeouts. Lease election is not fencing: cancellation cannot undo
 // requests already accepted by the API server, or protect against arbitrary pauses.
+// On a deliberate exit the Lease is handed over after the controllers drain, so
+// only ungraceful exits (crash, freeze, SIGKILL) wait out the expiry.
 const (
 	LeaseDuration = 120 * time.Second
 	RenewDeadline = 60 * time.Second
 	RetryPeriod   = 10 * time.Second
+
+	// handOverLeaseDurationSeconds is the Lease duration the hand-over
+	// writes on a deliberate exit: already expired, the same shape
+	// client-go's own release writes.
+	handOverLeaseDurationSeconds = 1
 )
 
 // ErrLeadershipLost makes the process exit rather than restart stopped controllers.
@@ -90,7 +97,10 @@ func New(client coordination.CoordinationV1Interface, namespace, managementClust
 }
 
 // Start waits on standby, then runs until shutdown, controller exit, or lease loss.
-// It waits for all controllers before returning and never releases the Lease early.
+// It waits for all controllers before returning. On a deliberate exit (graceful
+// shutdown or controller failure) it hands the Lease over after the drain, so
+// the next owner takes over within one retry period; ungraceful exits still
+// wait out the Lease expiry.
 func (r *Runnable) Start(ctx context.Context) error {
 	electionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -132,15 +142,63 @@ func (r *Runnable) Start(ctx context.Context) error {
 		controllerErr = <-finished
 	}
 	if ctx.Err() != nil {
+		// Graceful shutdown: the controllers have drained, so hand the
+		// Lease over now instead of making the next owner wait out the
+		// expiry.
+		r.releaseLease(ctx)
 		return controllerErr
 	}
 	if controllerErr != nil {
+		// The process is exiting on a controller failure; same hand-over.
+		r.releaseLease(ctx)
 		return controllerErr
 	}
 	// Reaching this point means the parent is alive and every controller
 	// returned nil: the only root cause left is a failed Lease renewal.
+	// No hand-over here: either another replica holds the Lease or the API
+	// is unreachable, so the expiry remains the takeover bound.
 	slog.WarnContext(ctx, "lost management-cluster leadership", "lease", cfg.Lock.Describe())
 	return ErrLeadershipLost
+}
+
+// releaseLease hands the Lease over on a deliberate exit: the controllers
+// have drained by the time it runs, so writing an already-expired record
+// lets the next replica take over within one retry period instead of
+// waiting out LeaseDuration. Deliberate exits are graceful shutdown and
+// controller failure; leadership loss still relies on the expiry, and a
+// crash or freeze never runs this at all, so the ungraceful-takeover bound
+// is unchanged. The write is conditional on a fresh read still naming this
+// replica as the holder, and the Lease's resource version protects the
+// check-then-update against a concurrent takeover.
+func (r *Runnable) releaseLease(parent context.Context) {
+	if !r.lock.everSucceeded() {
+		// Never led: nothing to hand over.
+		return
+	}
+	// The parent is already canceled on the graceful-shutdown path and the
+	// hand-over must still run: keep its values, shed its cancellation.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), RenewDeadline)
+	defer cancel()
+	record, _, err := r.lock.Get(ctx)
+	if err != nil {
+		// Gone or unreadable: the next owner falls back to the expiry.
+		slog.Warn("hand over lease: read", "lease", r.lock.Describe(), "error", err)
+		return
+	}
+	if record.HolderIdentity != r.lock.Identity() {
+		return
+	}
+	now := metav1.NewTime(time.Now())
+	if err := r.lock.Update(ctx, resourcelock.LeaderElectionRecord{
+		LeaderTransitions:    record.LeaderTransitions,
+		LeaseDurationSeconds: handOverLeaseDurationSeconds,
+		RenewTime:            now,
+		AcquireTime:          now,
+	}); err != nil {
+		slog.Warn("hand over lease: update", "lease", r.lock.Describe(), "error", err)
+		return
+	}
+	slog.Info("handed over management-cluster lease", "lease", r.lock.Describe())
 }
 
 // runControllers starts every runnable under a context carrying the
