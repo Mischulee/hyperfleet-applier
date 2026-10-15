@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/controllers/util"
+	"github.com/openshift-hyperfleet/hyperfleet-applier/internal/reconciler"
 	"github.com/openshift-hyperfleet/hyperfleet-applier/pkg/desire"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -271,7 +272,17 @@ func (r *DeleteReconciler) executeDelete(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return desire.Status{}, ctxErr
 	}
-	deleteCtx, deleteCancel := context.WithTimeout(ctx, r.timeout)
+	// Lease freshness: a stalled-and-resumed leader must not issue DELETE
+	// even though its context is not canceled yet (HYPERFLEET-1777). The
+	// gate cancels the run context on denial, so the RunOnce pass aborts
+	// through the ctx.Err() classification above.
+	if gateErr := reconciler.CanWrite(ctx); gateErr != nil {
+		return desire.Status{}, fmt.Errorf("delete %s: %w", util.DescribeIdentity(d.Identity), gateErr)
+	}
+	// The write context is capped at the last successful renewal plus the
+	// freshness bound, so the request cannot be sent or stay in flight past
+	// that point even if the process pauses right after the check.
+	deleteCtx, deleteCancel := reconciler.WriteContext(ctx, r.timeout)
 	defer deleteCancel()
 
 	err = client.Delete(deleteCtx, d.Identity.Name, metav1.DeleteOptions{})
@@ -282,6 +293,12 @@ func (r *DeleteReconciler) executeDelete(
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return desire.Status{}, fmt.Errorf("delete %s: %w", util.DescribeIdentity(d.Identity), ctxErr)
+		}
+		// A request aborted by the freshness cap means leadership went stale
+		// between the gate check and the call: control flow, not a desire
+		// failure.
+		if gateErr := reconciler.CanWrite(ctx); gateErr != nil {
+			return desire.Status{}, fmt.Errorf("delete %s: %w", util.DescribeIdentity(d.Identity), gateErr)
 		}
 		return deleteFailed(d.Status, err), nil
 	}

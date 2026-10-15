@@ -67,6 +67,16 @@ end-to-end failover bound. A new leader starts reconciliation immediately.
 Lease election is not fencing against arbitrary process pauses: cancellation
 prevents subsequent writes but cannot undo a request already accepted by the
 API server. The timeout margin assumes responsive processes and bounded calls.
+To also cover a leader that stalls past the lease duration and resumes -
+after another replica may have taken over, but before the client-go elector
+gives up - every SSA and DELETE call is additionally gated on lease
+freshness: the leader's last successful lease renewal must be younger than
+the lease duration minus one retry period. When it is not, the write is
+refused, the controllers' context is canceled, and the process exits exactly
+as it does on renewal failure. Each write context is also capped at the last
+successful renewal plus that bound, so a process paused between the check
+and the request resumes to an expired write context instead of sending it,
+and a request already in flight is aborted at the bound.
 
 The chart creates a namespaced Role/RoleBinding granting `get`, `create`, and
 `update` on Leases, independently of the reconciliation allowlist. With
