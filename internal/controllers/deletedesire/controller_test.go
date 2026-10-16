@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -38,9 +39,22 @@ func (s *completedDeleteSpecStore) GetDeleteDesire(
 		return dd, err
 	}
 	if id == s.doneID {
-		dd.Status = deleted(desire.Status{}) // IsDeleted(dd.Status) == true
+		dd.Status = deleted(desire.Status{}, dd.Generation) // IsDeleted(dd.Status) == true
 	}
 	return dd, nil
+}
+
+// countingStatusStore counts UpdateDeleteDesireStatus calls
+type countingStatusStore struct {
+	desire.StatusStore
+	updateCalls int
+}
+
+func (c *countingStatusStore) UpdateDeleteDesireStatus(
+	ctx context.Context, id desire.Identity, status desire.Status, version int64,
+) (desire.DeleteDesire, error) {
+	c.updateCalls++
+	return c.StatusStore.UpdateDeleteDesireStatus(ctx, id, status, version)
 }
 
 // Testing error mapping scenarios
@@ -174,6 +188,10 @@ func TestDeleteRunOnce(t *testing.T) {
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonDeleted {
 			t.Errorf("Condition 0: Reason is not Deleted, should be Deleted")
 		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
+		}
 	})
 
 	t.Run("DeletesClusterScopedResourceSuccessfully", func(t *testing.T) {
@@ -224,6 +242,10 @@ func TestDeleteRunOnce(t *testing.T) {
 		}
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonDeleted {
 			t.Errorf("Condition 0: Reason is not Deleted, should be Deleted")
+		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
 		}
 	})
 
@@ -332,6 +354,10 @@ func TestDeleteRunOnce(t *testing.T) {
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonDeleted {
 			t.Errorf("Condition 0: Reason = %s, want Deleted", updatedDesire.Status.Conditions[0].Reason)
 		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
+		}
 	})
 
 	t.Run("PreCheckFailsWhenNamespacedResourceHasEmptyNamespace", func(t *testing.T) {
@@ -377,6 +403,10 @@ func TestDeleteRunOnce(t *testing.T) {
 		}
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonPreCheckFailed {
 			t.Errorf("Condition 0: Reason = %s, want PreCheckFailed", updatedDesire.Status.Conditions[0].Reason)
+		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
 		}
 	})
 
@@ -426,6 +456,10 @@ func TestDeleteRunOnce(t *testing.T) {
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonPreCheckFailed {
 			t.Errorf("Condition 0: Reason = %s, want PreCheckFailed", updatedDesire.Status.Conditions[0].Reason)
 		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
+		}
 	})
 
 	t.Run("PreCheckFailsWhenMapperReturnsGenericError", func(t *testing.T) {
@@ -473,6 +507,134 @@ func TestDeleteRunOnce(t *testing.T) {
 		}
 		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonPreCheckFailed {
 			t.Errorf("Condition 0: Reason = %s, want PreCheckFailed", updatedDesire.Status.Conditions[0].Reason)
+		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
+		}
+	})
+
+	t.Run("RecordsKubeAPIErrorWhenGetFails", func(t *testing.T) {
+		testCtx := t.Context()
+
+		testDynamicClient := newFakeDynamicClient(t,
+			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-get-fails", Namespace: testNamespace}},
+		)
+		getErr := fmt.Errorf("simulated apiserver outage")
+		testDynamicClient.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, getErr
+		})
+
+		dr := New(testStore, testStore, testDynamicClient, testMapper, testManagementCluster)
+
+		testDesire := desire.DeleteDesire{
+			Identity: desire.Identity{
+				Type:              desire.TypeDelete,
+				ManagementCluster: testManagementCluster,
+				Group:             "",
+				Resource:          configMapsType,
+				Namespace:         testNamespace,
+				Name:              "cm-get-fails",
+			},
+			Owner:   testOwner,
+			Version: 1,
+		}
+		testDesire, err := testStore.CreateDeleteDesire(testCtx, testDesire)
+		if err != nil {
+			t.Fatalf("CreateDeleteDesire() error = %v", err)
+		}
+
+		if err = dr.RunOnce(testCtx); err != nil {
+			t.Fatalf("RunOnce() error = %v, should be nil", err)
+		}
+
+		updatedDesire, err := testStore.GetDeleteDesire(testCtx, testDesire.Identity)
+		if err != nil {
+			t.Fatalf("GetDeleteDesire() error = %v", err)
+		}
+
+		if len(updatedDesire.Status.Conditions) == 0 {
+			t.Fatalf("Status.Conditions is empty, should be updated")
+		}
+		if updatedDesire.Status.Conditions[0].Type != desire.TypeSuccessful {
+			t.Errorf("Condition 0: Type = %s, want Successful", updatedDesire.Status.Conditions[0].Type)
+		}
+		if updatedDesire.Status.Conditions[0].Status != metav1.ConditionFalse {
+			t.Errorf("Condition 0: Status = %s, want False", updatedDesire.Status.Conditions[0].Status)
+		}
+		if updatedDesire.Status.Conditions[0].Reason != desire.ReasonKubeAPIError {
+			t.Errorf("Condition 0: Reason = %s, want KubeAPIError", updatedDesire.Status.Conditions[0].Reason)
+		}
+		if updatedDesire.Status.Conditions[0].ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("Condition 0: ObservedGeneration = %d, want %d",
+				updatedDesire.Status.Conditions[0].ObservedGeneration, updatedDesire.Generation)
+		}
+	})
+
+	t.Run("SuppressesRedundantStatusWriteWhenUnchanged", func(t *testing.T) {
+		testCtx := t.Context()
+
+		deletionTimestamp := metav1.NewTime(metav1.Now().Truncate(time.Second))
+		testDynamicClient := newFakeDynamicClient(t,
+			&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "cm-stuck",
+					Namespace:         testNamespace,
+					UID:               "fixed-uid",
+					DeletionTimestamp: &deletionTimestamp,
+					Finalizers:        []string{"example.com/finalizer"},
+				},
+			},
+		)
+		base := memory.New()
+		counting := &countingStatusStore{StatusStore: base}
+		dr := New(base, counting, testDynamicClient, testMapper, testManagementCluster)
+
+		testDesire := desire.DeleteDesire{
+			Identity: desire.Identity{
+				Type:              desire.TypeDelete,
+				ManagementCluster: testManagementCluster,
+				Group:             "",
+				Resource:          configMapsType,
+				Namespace:         testNamespace,
+				Name:              "cm-stuck",
+			},
+			Owner:   testOwner,
+			Version: 1,
+		}
+		if _, err := base.CreateDeleteDesire(testCtx, testDesire); err != nil {
+			t.Fatalf("CreateDeleteDesire() error = %v", err)
+		}
+
+		if err := dr.RunOnce(testCtx); err != nil {
+			t.Fatalf("RunOnce() [1st] error = %v, should be nil", err)
+		}
+		if counting.updateCalls != 1 {
+			t.Fatalf("status update calls after 1st pass = %d, want 1", counting.updateCalls)
+		}
+		afterFirst, err := base.GetDeleteDesire(testCtx, testDesire.Identity)
+		if err != nil {
+			t.Fatalf("GetDeleteDesire() error = %v", err)
+		}
+		if len(afterFirst.Status.Conditions) != 1 {
+			t.Fatalf("test setup: Conditions = %d, want exactly 1: %+v",
+				len(afterFirst.Status.Conditions), afterFirst.Status.Conditions)
+		}
+		cond := afterFirst.Status.Conditions[0]
+		if cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonWaitingForDeletion {
+			t.Fatalf("test setup: Condition 0 = %+v, want Status=False Reason=WaitingForDeletion", cond)
+		}
+		if cond.ObservedGeneration != afterFirst.Generation {
+			t.Fatalf("test setup: Condition 0 ObservedGeneration = %d, want %d",
+				cond.ObservedGeneration, afterFirst.Generation)
+		}
+
+		if err := dr.RunOnce(testCtx); err != nil {
+			t.Fatalf("RunOnce() [2nd] error = %v, should be nil", err)
+		}
+		if counting.updateCalls != 1 {
+			t.Errorf("status update calls after 2nd pass = %d, want still 1: "+
+				"unchanged status/ObservedGeneration must suppress the redundant write", counting.updateCalls)
 		}
 	})
 }

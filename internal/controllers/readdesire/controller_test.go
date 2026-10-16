@@ -255,6 +255,9 @@ func TestPollOnce_UnresolvableGVRRecordsPreCheckFailed(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonPreCheckFailed {
 		t.Errorf("condition = %+v, want Status=False Reason=%q", cond, desire.ReasonPreCheckFailed)
 	}
+	if cond != nil && cond.ObservedGeneration != got.Generation {
+		t.Errorf("condition.ObservedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)
+	}
 	if _, ok, _ := c.informers.Lister(id); ok {
 		t.Errorf("informer exists for a desire whose GVR never resolved, want none")
 	}

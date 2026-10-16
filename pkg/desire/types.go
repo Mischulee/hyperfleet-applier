@@ -114,8 +114,8 @@ type DeleteDesire struct {
 	OriginID string `json:"originId,omitempty"`
 	Status   Status `json:"status"`
 	// Generation is set by the store to InitialGeneration at creation. Delete
-	// desires have no spec-update operation. Condition generation stamping is
-	// tracked by HYPERFLEET-1725 (see package documentation).
+	// desires have no spec-update operation, so it never advances (see package
+	// documentation).
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for status writes and desire deletion.
 	Version int64 `json:"version"`
@@ -137,8 +137,8 @@ type ReadDesire struct {
 	TargetVersion string     `json:"targetVersion"`
 	Status        ReadStatus `json:"status"`
 	// Generation is set by the store to InitialGeneration at creation. Read
-	// desires have no spec-update operation. Condition generation stamping is
-	// tracked by HYPERFLEET-1725 (see package documentation).
+	// desires have no spec-update operation, so it never advances (see package
+	// documentation).
 	Generation int64 `json:"generation"`
 	// Version is the compare-and-swap token for desire deletion; status writes
 	// do not advance it.

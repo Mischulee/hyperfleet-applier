@@ -271,7 +271,7 @@ func (c *Controller) pollOnce(ctx context.Context) error {
 				d.Identity.Group, d.TargetVersion, d.Identity.Resource, err)
 
 			if statusErr := c.applyStatus(ctx, d.Identity, func(rd desire.ReadDesire) desire.ReadStatus {
-				return preCheckFailed(rd.Status, msg)
+				return preCheckFailed(rd.Status, rd.Generation, msg)
 			}); statusErr != nil {
 				slog.ErrorContext(ctx, "readdesire: record precheck failure status failed",
 					"namespace", d.Identity.Namespace,
@@ -297,7 +297,7 @@ func (c *Controller) pollOnce(ctx context.Context) error {
 		msg := fmt.Sprintf("readdesire: start informer failed: %v", err)
 
 		if statusErr := c.applyStatus(ctx, key, func(rd desire.ReadDesire) desire.ReadStatus {
-			return preCheckFailed(rd.Status, msg)
+			return preCheckFailed(rd.Status, rd.Generation, msg)
 		}); statusErr != nil {
 			slog.ErrorContext(ctx, "readdesire: record informer-start failure status failed",
 				"namespace", key.Namespace,

@@ -60,7 +60,7 @@ func (c *Controller) processNextWorkItem(ctx context.Context) bool {
 // object via the informer Lister, and persist the result if it changed.
 func (c *Controller) sync(ctx context.Context, key desire.Identity) error {
 	return c.applyStatus(ctx, key, func(d desire.ReadDesire) desire.ReadStatus {
-		return c.observe(ctx, key, d.TargetVersion, d.Status)
+		return c.observe(ctx, key, d.TargetVersion, d.Generation, d.Status)
 	})
 }
 
@@ -122,9 +122,10 @@ func logStatusWrite(ctx context.Context, id desire.Identity, outcome string, wri
 // transient error, and used as the LastTransitionTime baseline for an
 // unchanged condition via conditions.WithCondition). targetVersion is the
 // desire's declared TargetVersion, checked against the live object's actual
-// version below.
+// version below. generation is stamped into the resulting condition's
+// ObservedGeneration.
 func (c *Controller) observe(
-	ctx context.Context, key desire.Identity, targetVersion string, current desire.ReadStatus,
+	ctx context.Context, key desire.Identity, targetVersion string, generation int64, current desire.ReadStatus,
 ) desire.ReadStatus {
 	lister, ok, cacheSynced := c.informers.Lister(key)
 	if !ok {
@@ -135,7 +136,7 @@ func (c *Controller) observe(
 		// key was enqueued while its informer was running, then Reconcile
 		// removed the desire (it's gone from the store) before this worker
 		// got to it. Treat the same as not-found rather than erroring.
-		return notFound(current)
+		return notFound(current, generation)
 	}
 
 	// GenericLister.Get assumes name==key, matching MetaNamespaceKeyFunc's
@@ -154,24 +155,24 @@ func (c *Controller) observe(
 	}
 	if apierrors.IsNotFound(err) {
 		if !cacheSynced {
-			return kubeAPIError(current, fmt.Errorf(
+			return kubeAPIError(current, generation, fmt.Errorf(
 				"informer cache has not synced yet, cannot confirm absence: %w", err))
 		}
-		return notFound(current)
+		return notFound(current, generation)
 	}
 	if err != nil {
-		return kubeAPIError(current, err)
+		return kubeAPIError(current, generation, err)
 	}
 
 	if actual := obj.GetObjectKind().GroupVersionKind().Version; actual != targetVersion {
-		return c.observeLive(ctx, key, targetVersion, current)
+		return c.observeLive(ctx, key, targetVersion, generation, current)
 	}
 
 	content, err := json.Marshal(obj)
 	if err != nil {
-		return kubeAPIError(current, err)
+		return kubeAPIError(current, generation, err)
 	}
-	return synced(current, content)
+	return synced(current, generation, content)
 }
 
 // observeLive is the fallback for when the informer cache's object disagrees
@@ -183,11 +184,11 @@ func (c *Controller) observe(
 // longer explainable as cache lag - it's a genuine misconfiguration or
 // persistent failure, so it's escalated to a real KubeAPIError status write.
 func (c *Controller) observeLive(
-	ctx context.Context, key desire.Identity, targetVersion string, current desire.ReadStatus,
+	ctx context.Context, key desire.Identity, targetVersion string, generation int64, current desire.ReadStatus,
 ) desire.ReadStatus {
 	gvr, err := c.resolveGVR(key.Group, targetVersion, key.Resource)
 	if err != nil {
-		return kubeAPIError(current, err)
+		return kubeAPIError(current, generation, err)
 	}
 
 	ri := c.dyn.Resource(gvr)
@@ -198,14 +199,14 @@ func (c *Controller) observeLive(
 
 	obj, err := resourceClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return notFound(current)
+		return notFound(current, generation)
 	}
 	if err != nil {
-		return kubeAPIError(current, err)
+		return kubeAPIError(current, generation, err)
 	}
 
 	if actual := obj.GetObjectKind().GroupVersionKind().Version; actual != targetVersion {
-		return kubeAPIError(current, fmt.Errorf(
+		return kubeAPIError(current, generation, fmt.Errorf(
 			"live object version %q still does not match declared TargetVersion %q after a direct Get "+
 				"(informer cache was not merely stale)", actual, targetVersion))
 	}
@@ -215,7 +216,7 @@ func (c *Controller) observeLive(
 
 	content, err := json.Marshal(obj)
 	if err != nil {
-		return kubeAPIError(current, err)
+		return kubeAPIError(current, generation, err)
 	}
-	return synced(current, content)
+	return synced(current, generation, content)
 }

@@ -145,6 +145,9 @@ func TestSync_FoundObjectRecordsSynced(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != desire.ReasonSynced {
 		t.Errorf("condition = %+v, want Status=True Reason=%q", cond, desire.ReasonSynced)
 	}
+	if cond != nil && cond.ObservedGeneration != got.Generation {
+		t.Errorf("condition.ObservedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)
+	}
 	wantContent, err := json.Marshal(obj)
 	if err != nil {
 		t.Fatalf("marshal want content: %v", err)
@@ -178,6 +181,9 @@ func TestSync_SyncedEmptyCacheRecordsNotFound(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonNotFound {
 		t.Errorf("condition = %+v, want Status=False Reason=%q", cond, desire.ReasonNotFound)
 	}
+	if cond != nil && cond.ObservedGeneration != got.Generation {
+		t.Errorf("condition.ObservedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)
+	}
 }
 
 // TestSync_UnsyncedEmptyCacheRecordsKubeAPIError proves that a NotFound from
@@ -203,6 +209,9 @@ func TestSync_UnsyncedEmptyCacheRecordsKubeAPIError(t *testing.T) {
 	cond := findCondition(got.Status.Status, desire.TypeSuccessful)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonKubeAPIError {
 		t.Errorf("condition = %+v, want Status=False Reason=%q", cond, desire.ReasonKubeAPIError)
+	}
+	if cond != nil && cond.ObservedGeneration != got.Generation {
+		t.Errorf("condition.ObservedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)
 	}
 }
 

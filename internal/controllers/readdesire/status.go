@@ -21,11 +21,12 @@ const (
 
 // synced returns a copy of status with the Successful condition set to True,
 // reason Synced, and KubeContent set to the mirrored object's content.
-func synced(status desire.ReadStatus, kubeContent []byte) desire.ReadStatus {
+func synced(status desire.ReadStatus, generation int64, kubeContent []byte) desire.ReadStatus {
 	return withReadCondition(status, metav1.Condition{
-		Type:   desire.TypeSuccessful,
-		Status: metav1.ConditionTrue,
-		Reason: desire.ReasonSynced,
+		Type:               desire.TypeSuccessful,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: generation,
+		Reason:             desire.ReasonSynced,
 	}, kubeContent)
 }
 
@@ -33,23 +34,25 @@ func synced(status desire.ReadStatus, kubeContent []byte) desire.ReadStatus {
 // False, reason NotFound, and KubeContent cleared: the target does not
 // currently exist, so there is nothing to mirror - the next observed
 // creation resolves it.
-func notFound(status desire.ReadStatus) desire.ReadStatus {
+func notFound(status desire.ReadStatus, generation int64) desire.ReadStatus {
 	return withReadCondition(status, metav1.Condition{
-		Type:   desire.TypeSuccessful,
-		Status: metav1.ConditionFalse,
-		Reason: desire.ReasonNotFound,
+		Type:               desire.TypeSuccessful,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: generation,
+		Reason:             desire.ReasonNotFound,
 	}, nil)
 }
 
 // kubeAPIError returns a copy of status with the Successful condition set to
 // False, reason KubeAPIError. KubeContent is left as it was on status: a
 // transient read failure doesn't invalidate the last known mirrored content.
-func kubeAPIError(status desire.ReadStatus, err error) desire.ReadStatus {
+func kubeAPIError(status desire.ReadStatus, generation int64, err error) desire.ReadStatus {
 	return withReadCondition(status, metav1.Condition{
-		Type:    desire.TypeSuccessful,
-		Status:  metav1.ConditionFalse,
-		Reason:  desire.ReasonKubeAPIError,
-		Message: err.Error(),
+		Type:               desire.TypeSuccessful,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: generation,
+		Reason:             desire.ReasonKubeAPIError,
+		Message:            err.Error(),
 	}, status.KubeContent)
 }
 
@@ -60,12 +63,13 @@ func kubeAPIError(status desire.ReadStatus, err error) desire.ReadStatus {
 // same reason, same "the call could not be executed at all" meaning.
 // KubeContent is left as it was: an unresolvable target doesn't invalidate
 // previously-mirrored content from before it became unresolvable.
-func preCheckFailed(status desire.ReadStatus, msg string) desire.ReadStatus {
+func preCheckFailed(status desire.ReadStatus, generation int64, msg string) desire.ReadStatus {
 	return withReadCondition(status, metav1.Condition{
-		Type:    desire.TypeSuccessful,
-		Status:  metav1.ConditionFalse,
-		Reason:  desire.ReasonPreCheckFailed,
-		Message: msg,
+		Type:               desire.TypeSuccessful,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: generation,
+		Reason:             desire.ReasonPreCheckFailed,
+		Message:            msg,
 	}, status.KubeContent)
 }
 

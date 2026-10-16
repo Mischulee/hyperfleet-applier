@@ -15,18 +15,17 @@
 // The store assigns Generation 1 when it creates a desire. Generation advances
 // only when Apply spec content changes, independently of the CAS Version, which
 // advances on accepted Apply spec updates and on Apply and Delete status writes.
-// The Apply controller stamps
-// the generation it processed into the Successful condition's
-// ObservedGeneration. Compare those two fields on the same returned ApplyDesire:
-// a missing condition means no reported outcome; a mismatch means the condition
-// describes an earlier spec; a match means Status and Reason describe an attempt
-// at the current spec. A matching generation alone does not imply success or
-// Kubernetes workload readiness.
+// Every controller stamps the generation it processed into its Successful
+// condition's ObservedGeneration. Compare those two fields on the same returned
+// desire: a missing condition means no reported outcome; a mismatch means the
+// condition describes an earlier spec; a match means Status and Reason describe
+// an attempt at the current spec. A matching generation alone does not imply
+// success or Kubernetes workload readiness.
 //
 // Delete and Read desires also receive Generation 1 from the store, but have no
-// spec-update operation. Their controllers do not yet stamp ObservedGeneration;
-// HYPERFLEET-1725 tracks their adoption:
-// https://redhat.atlassian.net/browse/HYPERFLEET-1725.
+// spec-update operation, so it never advances. Their controllers still stamp it
+// into ObservedGeneration on every outcome, for the same correlation contract
+// Apply follows.
 //
 // Desire Generation and its condition's ObservedGeneration are independent of
 // the HyperFleet API resource's generation (carried by the adapter in the

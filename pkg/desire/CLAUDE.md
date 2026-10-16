@@ -20,14 +20,13 @@ Each record also has `Generation`, initialized to 1 on creation. A successful
 previous status untouched; equivalent JSON with different whitespace or object key order does
 not increment it. Status writes never change it. `Version` remains the CAS token and advances on
 every accepted Apply spec update, even if the content is unchanged, and can advance on status
-writes. For Apply,
-compare the `Successful` condition's `ObservedGeneration` with the desire's `Generation` in the
-same returned record: a mismatch means the condition describes an older spec; a match means its
-status and reason describe an attempt at the current spec, not necessarily success or workload
-readiness. A missing condition supplies no reported outcome. Delete and Read desires are assigned
-generation 1 by the store and have no spec-update operation. Their controllers do not stamp
-`ObservedGeneration` yet; [HYPERFLEET-1725](https://redhat.atlassian.net/browse/HYPERFLEET-1725)
-owns that follow-up.
+writes. For every desire type, compare the `Successful` condition's `ObservedGeneration` with the
+desire's `Generation` in the same returned record: a mismatch means the condition describes an
+older spec; a match means its status and reason describe an attempt at the current spec, not
+necessarily success or workload readiness. A missing condition supplies no reported outcome.
+Delete and Read desires are assigned generation 1 by the store and have no spec-update operation,
+so it never advances, but their controllers still stamp it into `ObservedGeneration` on every
+outcome.
 
 ### Generation boundaries
 

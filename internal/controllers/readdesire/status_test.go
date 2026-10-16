@@ -11,11 +11,14 @@ import (
 
 func TestSynced_SetsSyncedReasonAndKubeContent(t *testing.T) {
 	content := []byte(`{"kind":"ConfigMap"}`)
-	got := synced(desire.ReadStatus{}, content)
+	got := synced(desire.ReadStatus{}, 5, content)
 
 	cond := findCondition(got.Status, desire.TypeSuccessful)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != desire.ReasonSynced {
 		t.Errorf("condition = %+v, want Status=True Reason=%q", cond, desire.ReasonSynced)
+	}
+	if cond != nil && cond.ObservedGeneration != 5 {
+		t.Errorf("condition.ObservedGeneration = %d, want 5", cond.ObservedGeneration)
 	}
 	if string(got.KubeContent) != string(content) {
 		t.Errorf("KubeContent = %s, want %s", got.KubeContent, content)
@@ -24,11 +27,14 @@ func TestSynced_SetsSyncedReasonAndKubeContent(t *testing.T) {
 
 func TestNotFound_ClearsKubeContentAndSetsNotFoundReason(t *testing.T) {
 	current := desire.ReadStatus{KubeContent: []byte(`{"stale":"content"}`)}
-	got := notFound(current)
+	got := notFound(current, 6)
 
 	cond := findCondition(got.Status, desire.TypeSuccessful)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonNotFound {
 		t.Errorf("condition = %+v, want Status=False Reason=%q", cond, desire.ReasonNotFound)
+	}
+	if cond != nil && cond.ObservedGeneration != 6 {
+		t.Errorf("condition.ObservedGeneration = %d, want 6", cond.ObservedGeneration)
 	}
 	if got.KubeContent != nil {
 		t.Errorf("KubeContent = %s, want nil: a not-found result must not carry over stale content", got.KubeContent)
@@ -40,7 +46,7 @@ func TestKubeAPIError_PreservesPriorKubeContent(t *testing.T) {
 	current := desire.ReadStatus{KubeContent: priorContent}
 	readErr := errors.New("transient list error")
 
-	got := kubeAPIError(current, readErr)
+	got := kubeAPIError(current, 7, readErr)
 
 	cond := findCondition(got.Status, desire.TypeSuccessful)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonKubeAPIError {
@@ -49,8 +55,33 @@ func TestKubeAPIError_PreservesPriorKubeContent(t *testing.T) {
 	if cond != nil && cond.Message != readErr.Error() {
 		t.Errorf("condition.Message = %q, want %q", cond.Message, readErr.Error())
 	}
+	if cond != nil && cond.ObservedGeneration != 7 {
+		t.Errorf("condition.ObservedGeneration = %d, want 7", cond.ObservedGeneration)
+	}
 	if string(got.KubeContent) != string(priorContent) {
 		t.Errorf("KubeContent = %s, want %s: a transient read failure must not erase the last known mirror",
+			got.KubeContent, priorContent)
+	}
+}
+
+func TestPreCheckFailed_SetsPreCheckFailedReasonAndObservedGeneration(t *testing.T) {
+	priorContent := []byte(`{"last":"known-good"}`)
+	current := desire.ReadStatus{KubeContent: priorContent}
+
+	got := preCheckFailed(current, 8, "no resource mapping")
+
+	cond := findCondition(got.Status, desire.TypeSuccessful)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != desire.ReasonPreCheckFailed {
+		t.Errorf("condition = %+v, want Status=False Reason=%q", cond, desire.ReasonPreCheckFailed)
+	}
+	if cond != nil && cond.Message != "no resource mapping" {
+		t.Errorf("condition.Message = %q, want %q", cond.Message, "no resource mapping")
+	}
+	if cond != nil && cond.ObservedGeneration != 8 {
+		t.Errorf("condition.ObservedGeneration = %d, want 8", cond.ObservedGeneration)
+	}
+	if string(got.KubeContent) != string(priorContent) {
+		t.Errorf("KubeContent = %s, want %s: an unresolvable target must not erase the last known mirror",
 			got.KubeContent, priorContent)
 	}
 }
