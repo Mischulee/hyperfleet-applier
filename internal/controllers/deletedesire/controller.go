@@ -121,6 +121,8 @@ func (r *DeleteReconciler) RunOnce(ctx context.Context) error {
 // issued but the resource still exists (finalizers, graceful termination).
 func (r *DeleteReconciler) reconcileOne(ctx context.Context, d desire.DeleteDesire) error {
 	var newStatus desire.Status
+	baseStatus := d.Status
+	version := d.Version
 
 	// Step 1: Pre-flight checks - resolve GVR, validate namespace
 	client, err := r.setupResourceClient(d.Identity)
@@ -137,27 +139,27 @@ func (r *DeleteReconciler) reconcileOne(ctx context.Context, d desire.DeleteDesi
 			)
 		}
 		if desire.IsDeleted(dd.Status) {
-			// Already completed successfully on a prior pass, nothing more to do.
-			slog.DebugContext(ctx, "delete: desire already completed, skipping",
-				"identity", d.Identity,
-			)
-			return nil
-		}
-
-		// Step 2: Execute the actual delete operation (GET → DELETE → GET)
-		newStatus, err = r.executeDelete(ctx, client, d)
-		if err != nil {
-			// Context cancellation - abort without writing status.
-			return err
+			// Already completed: restamp ObservedGeneration so a legacy record
+			// does not stay stale forever
+			newStatus = deleted(dd.Status, dd.Generation)
+			baseStatus = dd.Status
+			version = dd.Version
+		} else {
+			// Step 2: Execute the actual delete operation (GET → DELETE → GET)
+			newStatus, err = r.executeDelete(ctx, client, d)
+			if err != nil {
+				// Context cancellation - abort without writing status.
+				return err
+			}
 		}
 	}
 	// Step 3: Check to see if newStatus and old status are equal
-	if util.Equal(newStatus, d.Status) {
+	if util.Equal(newStatus, baseStatus) {
 		return nil
 	}
 
 	// Step 4: Update DeleteDesire status with newStatus - will abort if context is canceled
-	if _, err := r.status.UpdateDeleteDesireStatus(ctx, d.Identity, newStatus, d.Version); err != nil {
+	if _, err := r.status.UpdateDeleteDesireStatus(ctx, d.Identity, newStatus, version); err != nil {
 		if errors.Is(err, desire.ErrVersionConflict) {
 			slog.DebugContext(ctx, "delete: status write lost a version race, will retry next pass",
 				"identity", d.Identity,

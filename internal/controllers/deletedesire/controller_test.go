@@ -295,6 +295,73 @@ func TestDeleteRunOnce(t *testing.T) {
 		}
 	})
 
+	t.Run("RefreshesStaleObservedGenerationOnAlreadyDeletedDesire", func(t *testing.T) {
+		testCtx := t.Context()
+
+		testDynamicClient := newFakeDynamicClient(t,
+			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-legacy-deleted", Namespace: testNamespace}},
+		)
+		var apiCalled bool
+		testDynamicClient.PrependReactor("*", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+			apiCalled = true
+			return false, nil, nil // fall through to the default reactor
+		})
+
+		base := memory.New()
+		id := desire.Identity{
+			Type:              desire.TypeDelete,
+			ManagementCluster: testManagementCluster,
+			Group:             "",
+			Resource:          configMapsType,
+			Namespace:         testNamespace,
+			Name:              "cm-legacy-deleted",
+		}
+		created, err := base.CreateDeleteDesire(testCtx, desire.DeleteDesire{
+			Identity: id, Owner: testOwner, Version: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateDeleteDesire() error = %v", err)
+		}
+
+		// Legacy record: Deleted but ObservedGeneration never stamped.
+		legacyStatus := desire.Status{Conditions: []metav1.Condition{{
+			Type:               desire.TypeSuccessful,
+			Status:             metav1.ConditionTrue,
+			Reason:             desire.ReasonDeleted,
+			LastTransitionTime: metav1.Now(),
+		}}}
+		if _, err = base.UpdateDeleteDesireStatus(testCtx, id, legacyStatus, created.Version); err != nil {
+			t.Fatalf("seed legacy status: UpdateDeleteDesireStatus() error = %v", err)
+		}
+
+		dr := New(base, base, testDynamicClient, testMapper, testManagementCluster)
+
+		if err = dr.RunOnce(testCtx); err != nil {
+			t.Fatalf("RunOnce() error = %v, should be nil", err)
+		}
+
+		if apiCalled {
+			t.Error("made an apiserver call for a desire already recorded Deleted; " +
+				"refreshing ObservedGeneration must not touch the cluster")
+		}
+
+		updatedDesire, err := base.GetDeleteDesire(testCtx, id)
+		if err != nil {
+			t.Fatalf("GetDeleteDesire() error = %v", err)
+		}
+		if len(updatedDesire.Status.Conditions) != 1 {
+			t.Fatalf("Conditions = %d, want 1: %+v", len(updatedDesire.Status.Conditions), updatedDesire.Status.Conditions)
+		}
+		cond := updatedDesire.Status.Conditions[0]
+		if cond.Status != metav1.ConditionTrue || cond.Reason != desire.ReasonDeleted {
+			t.Fatalf("condition = %+v, want Status=True Reason=Deleted", cond)
+		}
+		if cond.ObservedGeneration != updatedDesire.Generation {
+			t.Errorf("ObservedGeneration = %d, want %d (refreshed from the stale zero value)",
+				cond.ObservedGeneration, updatedDesire.Generation)
+		}
+	})
+
 	t.Run("SucceedsWithoutDeleteCallWhenResourceAlreadyGone", func(t *testing.T) {
 		testCtx := t.Context()
 
